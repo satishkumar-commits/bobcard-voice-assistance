@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BOB Card Latency Monitor</title>
+    <link rel="stylesheet" href="/dashboard/latency.css" />
+  </head>
+  <body>
+    <main class="latency-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Realtime Monitor</p>
+          <h1>Latency Timeline</h1>
+          <p class="hero-copy">Watch Twilio, STT, Gemini, and TTS timings arrive live for each call.</p>
+        </div>
+        <div class="hero-actions">
+          <a class="ghost-link" href="/dashboard/">Conversation Console</a>
+          <span id="wsState" class="status-chip disconnected">disconnected</span>
+        </div>
+      </header>
+
+      <section class="control-row">
+        <label class="field">
+          <span>Filter by Call SID</span>
+          <input id="callSidFilter" type="text" placeholder="Leave empty to watch all calls" />
+        </label>
+        <button id="watchCallButton" class="primary-button" type="button">Watch Call</button>
+        <button id="clearFilterButton" class="secondary-button" type="button">Show All</button>
+        <button id="refreshCallsButton" class="secondary-button" type="button">Refresh Recent Calls</button>
+      </section>
+
+      <section class="metrics-grid">
+        <article class="metric-card">
+          <span>Active Call</span>
+          <strong id="activeCallValue">All calls</strong>
+        </article>
+        <article class="metric-card">
+          <span>Last STT</span>
+          <strong id="sttMetric">-</strong>
+        </article>
+        <article class="metric-card">
+          <span>Last Gemini</span>
+          <strong id="geminiMetric">-</strong>
+        </article>
+        <article class="metric-card">
+          <span>Last TTS</span>
+          <strong id="ttsMetric">-</strong>
+        </article>
+      </section>
+
+      <section class="panel-grid">
+        <aside class="side-panel">
+          <div class="panel-head">
+            <h2>Recent Calls</h2>
+          </div>
+          <div id="recentCalls" class="recent-calls empty">Loading recent calls...</div>
+        </aside>
+
+        <section class="log-panel">
+          <div class="panel-head log-head">
+            <div>
+              <h2>Live Latency Events</h2>
+              <p id="feedSubtitle" class="panel-copy">Streaming all calls.</p>
+            </div>
+            <label class="toggle">
+              <input id="autoScrollToggle" type="checkbox" checked />
+              <span>Auto scroll</span>
+            </label>
+          </div>
+
+          <div class="table-wrap">
+            <table class="latency-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Step</th>
+                  <th>Call</th>
+                  <th>Latency</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody id="latencyTableBody">
+                <tr class="empty-row">
+                  <td colspan="5">Waiting for realtime latency events...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="/dashboard/latency.js"></script>
+  </body>
+</html>

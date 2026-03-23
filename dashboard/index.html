@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BOBCards Voice Console</title>
+    <link rel="stylesheet" href="/dashboard/styles.css" />
+  </head>
+  <body>
+    <main class="console-shell">
+      <header class="topbar">
+        <div class="topbar-status">
+          <span class="live-dot"></span>
+          <span id="wsState" class="topbar-text">disconnected</span>
+        </div>
+        <a class="link-button" href="/dashboard/latency.html">Latency Monitor</a>
+      </header>
+
+      <section class="console-grid">
+        <aside class="left-panel panel-frame">
+          <div class="panel-head">
+            <h2>Initiate Call</h2>
+            <span class="panel-note">Name-aware Twilio calling</span>
+          </div>
+
+          <label class="field">
+            <span>Customer Name</span>
+            <input id="customerNameInput" type="text" placeholder="e.g. Rahul Sharma" />
+          </label>
+
+          <label class="field">
+            <span>Mobile Number</span>
+            <input id="mobileNumberInput" type="tel" placeholder="+919876543210" />
+          </label>
+
+          <label class="field">
+            <span>Language</span>
+            <select id="languageSelect">
+              <option value="hi-IN">Hindi (hi-IN)</option>
+              <option value="en-IN">English (en-IN)</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Demo Applicant</span>
+            <select id="demoApplicantSelect">
+              <option value="">Select a sample contact</option>
+            </select>
+          </label>
+
+          <button id="placeCallButton" class="primary-action">Initiate Call</button>
+
+          <section class="metric-strip">
+            <div class="metric-card">
+              <strong id="turnsMetric">0</strong>
+              <span>Turns</span>
+            </div>
+            <div class="metric-card">
+              <strong id="languageMetric">-</strong>
+              <span>Language</span>
+            </div>
+            <div class="metric-card">
+              <strong id="outcomeMetric">-</strong>
+              <span>Outcome</span>
+            </div>
+          </section>
+
+          <section class="recent-block">
+            <div class="panel-head">
+              <h3>Recent Calls</h3>
+              <button id="loadCallsButton" class="link-button" type="button">Refresh</button>
+            </div>
+            <div id="recentCalls" class="call-list empty">No calls loaded yet.</div>
+          </section>
+        </aside>
+
+        <section class="center-stage panel-frame">
+          <div class="panel-head wide">
+            <div class="panel-title-block">
+              <h2>Live Conversation</h2>
+              <p class="panel-subtitle">Real-time customer and AI transcript for the active call</p>
+            </div>
+            <span id="activeCallBadge" class="call-badge">No active call</span>
+          </div>
+
+          <div class="conversation-legend">
+            <span class="legend-item customer">Customer</span>
+            <span class="legend-item assistant">BOBCards AI</span>
+          </div>
+
+          <div id="conversationStatusBanner" class="conversation-banner idle">
+            Waiting for a call to start.
+          </div>
+
+          <div class="journey-strip" id="journeyStrip">
+            <div class="journey-step" data-stage="requesting">
+              <span class="journey-dot"></span>
+              <span>Requesting</span>
+            </div>
+            <div class="journey-step" data-stage="queued">
+              <span class="journey-dot"></span>
+              <span>Queued</span>
+            </div>
+            <div class="journey-step" data-stage="connected">
+              <span class="journey-dot"></span>
+              <span>Connected</span>
+            </div>
+            <div class="journey-step" data-stage="listening">
+              <span class="journey-dot"></span>
+              <span>Listening</span>
+            </div>
+            <div class="journey-step" data-stage="thinking">
+              <span class="journey-dot"></span>
+              <span>Thinking</span>
+            </div>
+            <div class="journey-step" data-stage="speaking">
+              <span class="journey-dot"></span>
+              <span>Speaking</span>
+            </div>
+          </div>
+
+          <div id="transcriptEmptyState" class="transcript-empty">
+            <div class="empty-mark">Call</div>
+            <p>Enter a customer name and mobile number on the left, then start a call.</p>
+            <small>The live AI and customer conversation will appear here automatically.</small>
+          </div>
+
+          <div id="transcriptLog" class="transcript-board"></div>
+        </section>
+
+        <aside class="right-panel">
+          <section class="panel-frame duration-card">
+            <div class="duration-value" id="timerState">00:00</div>
+            <div class="duration-label">Duration</div>
+          </section>
+
+          <section class="panel-frame status-stack">
+            <div class="panel-head">
+              <h3>Call Status</h3>
+              <span id="callState" class="panel-note">not subscribed</span>
+            </div>
+            <div class="status-grid">
+              <div class="status-pill">
+                <span>Mic</span>
+                <strong id="micState">off</strong>
+              </div>
+              <div class="status-pill">
+                <span>WebRTC</span>
+                <strong id="rtcState">idle</strong>
+              </div>
+              <div class="status-pill">
+                <span>Audio</span>
+                <strong id="qualityState">clear</strong>
+              </div>
+              <div class="status-pill">
+                <span>Fallback</span>
+                <strong id="fallbackState">off</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel-frame process-card">
+            <div class="panel-head">
+              <h3>Live Process</h3>
+              <span id="processState" class="panel-note">idle</span>
+            </div>
+            <div id="processTimeline" class="process-timeline"></div>
+          </section>
+          <section class="panel-frame event-card">
+            <div class="panel-head">
+              <h3>Main Points</h3>
+            </div>
+            <pre id="mainPointsState" class="log">Waiting for the first customer turn.</pre>
+          </section>
+          <section class="panel-frame event-card">
+            <div class="panel-head">
+              <h3>Response Plan</h3>
+            </div>
+            <pre id="responsePlanState" class="log">Waiting for the first plan.</pre>
+          </section>
+          <section class="panel-frame event-card">
+            <div class="panel-head">
+              <h3>Gemini Layer</h3>
+            </div>
+            <pre id="geminiDecisionState" class="log">Waiting for the first Gemini decision.</pre>
+          </section>
+          <section class="panel-frame event-card">
+            <div class="panel-head">
+              <h3>TTS Layer</h3>
+            </div>
+            <pre id="ttsStatusState" class="log">Waiting for the first TTS event.</pre>
+          </section>
+          <section class="panel-frame event-card">
+            <div class="panel-head">
+              <h3>Interruption Layer</h3>
+            </div>
+            <pre id="interruptionStatusState" class="log">Waiting for the first interruption event.</pre>
+          </section>
+          <section class="panel-frame event-card">
+            <div class="panel-head">
+              <h3>Call Summary</h3>
+            </div>
+            <pre id="callSummaryState" class="log">Waiting for the first completed summary.</pre>
+          </section>
+          <section class="panel-frame event-card">
+            <div class="panel-head">
+              <h3>Realtime Events</h3>
+            </div>
+            <div id="eventLog" class="log"></div>
+          </section>
+        </aside>
+      </section>
+    </main>
+
+    <script type="module" src="/dashboard/app.js"></script>
+  </body>
+</html>

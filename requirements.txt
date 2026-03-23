@@ -1,0 +1,10 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+SQLAlchemy==2.0.39
+aiosqlite==0.21.0
+pydantic-settings==2.8.1
+httpx==0.28.1
+twilio==9.5.1
+python-multipart==0.0.20
+greenlet==3.1.1
+sarvamai==0.1.27
