@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Response, WebSocket, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, WebSocket, status
 from pydantic import BaseModel, Field
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,8 +63,22 @@ def get_conversation_service(session: AsyncSession) -> ConversationService:
     )
 
 
+def resolve_public_url(request: Request, configured_public_url: str) -> str:
+    configured = configured_public_url.strip().rstrip("/")
+    if configured:
+        return configured
+
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    if forwarded_proto and forwarded_host:
+        return f"{forwarded_proto}://{forwarded_host}".rstrip("/")
+
+    return str(request.base_url).strip().rstrip("/")
+
+
 @router.post("/voice")
 async def incoming_voice_call(
+    request: Request,
     CallSid: str = Form(...),
     From: str | None = Form(default=None),
     To: str | None = Form(default=None),
@@ -95,8 +109,9 @@ async def incoming_voice_call(
     twilio_service = TwilioService(settings)
     service = get_conversation_service(session)
     customer_number = twilio_service.resolve_customer_number(From, To)
+    effective_public_url = resolve_public_url(request, settings.public_url)
 
-    if not settings.public_url:
+    if not effective_public_url:
         twiml = twilio_service.build_fallback_say_response(
             "The voice assistant is not configured with a public URL yet. Please try again later."
         )
@@ -124,6 +139,7 @@ async def incoming_voice_call(
         language=language,
         customer_number=customer_number or "",
         call_sid=CallSid,
+        public_url=effective_public_url,
     )
     logger.info("Incoming call %s initialized", CallSid)
     return Response(content=twiml, media_type="application/xml")
@@ -131,6 +147,7 @@ async def incoming_voice_call(
 
 @router.post("/recording")
 async def recording_callback(
+    request: Request,
     CallSid: str = Form(...),
     From: str | None = Form(default=None),
     To: str | None = Form(default=None),
@@ -157,6 +174,7 @@ async def recording_callback(
     )
     settings = get_settings()
     twilio_service = TwilioService(settings)
+    effective_public_url = resolve_public_url(request, settings.public_url)
     if twilio_service.has_processed_recording(RecordingSid, RecordingUrl):
         logger.info("Skipping duplicate recording callback for call=%s recording=%s", CallSid, RecordingSid or RecordingUrl)
         return Response(content=twilio_service.build_empty_response(), media_type="application/xml")
@@ -184,6 +202,7 @@ async def recording_callback(
         twiml = twilio_service.build_conversation_response(
             reply_audio_url=turn.public_audio_url,
             action_path=f"{settings.api_prefix}/twilio/recording",
+            public_url=effective_public_url,
         )
     return Response(content=twiml, media_type="application/xml")
 
@@ -200,7 +219,7 @@ async def call_status_callback(
 
 # connect with twilio
 @router.post("/outbound-call", response_model=OutboundCallResponse, status_code=status.HTTP_201_CREATED)
-async def create_outbound_call(payload: OutboundCallRequest) -> OutboundCallResponse:
+async def create_outbound_call(payload: OutboundCallRequest, request: Request) -> OutboundCallResponse:
     #send payload to the twilio
     emit_latency_event(
         {
@@ -220,12 +239,14 @@ async def create_outbound_call(payload: OutboundCallRequest) -> OutboundCallResp
     )
     settings = get_settings()
     twilio_service = TwilioService(settings)
+    effective_public_url = resolve_public_url(request, settings.public_url)
 
     try:
         call_sid = twilio_service.place_outbound_call(
             to_number=payload.mobile_number,
             customer_name=payload.customer_name,
             language=payload.language,
+            public_url=effective_public_url,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

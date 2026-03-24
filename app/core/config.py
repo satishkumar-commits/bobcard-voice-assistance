@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     sarvam_stt_use_streaming: bool = True
     sarvam_stt_streaming_mode: str = "transcribe"
     sarvam_stt_streaming_high_vad_sensitivity: bool = True
+    sarvam_stt_streaming_total_timeout_seconds: float = 8.0
+    sarvam_stt_streaming_recv_timeout_seconds: float = 4.0
+    sarvam_stt_streaming_cooldown_seconds: float = 20.0
+    sarvam_stt_rest_timeout_seconds: float = 15.0
     sarvam_tts_model: str = "bulbul:v3"
     sarvam_tts_voice: str = "simran"
     sarvam_tts_pace: float = 1.0
@@ -51,18 +55,20 @@ class Settings(BaseSettings):
     generated_audio_dir: str = "/tmp/bobcards_voice_generated_audio"
     generated_audio_ttl_seconds: int = 180
     dashboard_dir: str = "dashboard"
+    latency_logs_dir: str = "data/latency_logs"
     webrtc_ice_servers: str = "stun:stun.l.google.com:19302"
     stt_confidence_threshold: float = 0.55
-    vad_min_audio_bytes: int = 12000
+    vad_min_audio_bytes: int = 8000
     noisy_call_retry_prompt_trigger: int = 2
     noisy_call_fallback_trigger: int = 3
-    stream_vad_rms_threshold: int = 450
-    stream_vad_silence_ms: int = 420
-    stream_vad_min_speech_ms: int = 280
+    stream_vad_rms_threshold: int = 320
+    stream_vad_silence_ms: int = 520
+    stream_vad_min_speech_ms: int = 180
     stream_vad_max_speech_ms: int = 9000
-    stream_barge_in_grace_ms: int = 350
-    stream_barge_in_min_playback_ms: int = 650
-    stream_barge_in_min_speech_ms: int = 240
+    stream_stt_turn_timeout_seconds: float = 10.0
+    stream_barge_in_grace_ms: int = 220
+    stream_barge_in_min_playback_ms: int = 420
+    stream_barge_in_min_speech_ms: int = 160
     stream_utterance_queue_maxsize: int = 2
     tts_cache_max_entries: int = 96
 
@@ -89,6 +95,10 @@ class Settings(BaseSettings):
     @property
     def dashboard_path(self) -> Path:
         return Path(self.dashboard_dir)
+
+    @property
+    def latency_logs_path(self) -> Path:
+        return Path(self.latency_logs_dir)
 
     @property
     def webrtc_ice_server_list(self) -> list[str]:

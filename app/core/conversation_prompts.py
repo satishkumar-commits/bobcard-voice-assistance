@@ -126,7 +126,7 @@ PART_G_CALL_PHASES = {
     SESSION_CLEANUP,
 }
 
-ConsentChoice = Literal["granted", "callback", "opt_out", "unknown"]
+ConsentChoice = Literal["granted", "callback", "send_link", "opt_out", "unknown"]
 ResolutionChoice = Literal["more_help", "no_more_help", "unknown"]
 
 SUPPORTED_VOICE_LANGUAGES = {"hi-IN", "en-IN"}
@@ -152,12 +152,44 @@ ESCALATION_KEYWORDS = [
 AUTH_CONFIRM_KEYWORDS = [
     "haan", "ha", "han", "yes", "correct", "bilkul", "sahi", "theek",
     "right", "that's me", "speaking", "main hoon", "main hun", "bol raha hoon",
+    "हाँ", "हां", "जी हाँ", "जी हां", "हाँ जी", "हां जी", "जी",
 ]
 
 AUTH_DENY_KEYWORDS = [
     "nahi", "nahin", "no", "wrong number", "galat number",
     "not me", "wrong person", "koi aur", "kaun",
 ]
+
+IDENTITY_NAME_STOPWORDS = {
+    "hello",
+    "hi",
+    "hey",
+    "namaste",
+    "हलो",
+    "हेलो",
+    "नमस्ते",
+    "haan",
+    "ha",
+    "han",
+    "yes",
+    "ji",
+    "no",
+    "nahi",
+    "nahin",
+    "नहीं",
+    "नही",
+    "hindi",
+    "english",
+    "हिंदी",
+    "हिन्दी",
+    "अंग्रेज़ी",
+    "angrezi",
+    "day",
+    "days",
+    "din",
+    "दिवस",
+    "दिन",
+}
 
 LANGUAGE_SWITCH_TARGETS = {
     "en-IN": [
@@ -197,20 +229,20 @@ def build_opening_greeting(
 ) -> str:
     language = normalize_language(language)
     clean_name = _normalize_name(name)
+    assistant_name = _normalize_name(agent_name) or "Maya"
     if language == "hi-IN":
         return (
-            f"{_build_hindi_salutation(clean_name)} मैं बॉब कार्ड्स सपोर्ट टीम से बोल रही हूँ। "
-            "यह कॉल रिकॉर्ड की जा रही है। "
-            "मैंने देखा कि आपकी क्रेडिट कार्ड या बैंकिंग प्रक्रिया बीच में रुक गई थी। "
-            "उसी को पूरा कराने में मदद के लिए कॉल किया है। "
+            f"{_build_hindi_salutation(clean_name)} मैं {assistant_name} हूँ, Bank of Baroda की तरफ से एक AI voice assistant बोल रही हूँ। "
+            "यह कॉल quality aur training के लिए record हो रही है। "
+            "मैं आपकी BOBCards credit card application के बारे में call कर रही हूँ जो बीच में रुक गई थी। "
             "क्या अभी दो मिनट बात करना ठीक रहेगा?"
         )
 
     display_name = f"{clean_name} ji" if clean_name else "there"
     return (
-        f"Hello {display_name}. I am calling from the BOBCards support team. "
-        "This call is being recorded. You were applying for a credit card or continuing a banking process, "
-        "and I am calling to help you finish that step. "
+        f"Hello {display_name}. I am {assistant_name}, an AI assistant calling on behalf of Bank of Baroda. "
+        "This call is recorded for quality and training purposes. "
+        "I am calling regarding your BOBCards credit card application that was left incomplete. "
         "Is this a good time to speak for two minutes?"
     )
 
@@ -245,9 +277,16 @@ def build_consent_reprompt(language: str, name: str = "") -> str:
     clean_name = _normalize_name(name)
     if language == "hi-IN":
         salutation = _build_hindi_salutation(clean_name)
-        return f"{salutation} क्या आप अभी बात करने के लिए तैयार हैं? कृपया हाँ, बाद में, या मना कहिए।"
+        return (
+            f"{salutation} अगर अभी busy हैं तो आप तीन options में से चुन सकते हैं: "
+            "callback, SMS link, या do-not-call. "
+            "कृपया हाँ, callback, link, या मना कहिए।"
+        )
     prefix = f"{clean_name}, " if clean_name else ""
-    return f"{prefix}is this a good time to continue? Please say yes, callback, or no."
+    return (
+        f"{prefix}if now is not a good time, you can choose callback, SMS link, or do-not-call. "
+        "Please say yes, callback, link, or no."
+    )
 
 
 def build_language_prompt(name: str = "", language: str = "en-IN") -> str:
@@ -561,6 +600,8 @@ def detect_auth_confirmation(text: str) -> bool:
     normalized = _normalize_choice_text(text)
     if not normalized:
         return False
+    if _looks_like_identity_name_confirmation(normalized):
+        return True
     return any(marker in normalized for marker in AUTH_CONFIRM_KEYWORDS)
 
 
@@ -595,6 +636,22 @@ def detect_consent_choice(text: str) -> ConsentChoice:
     )
     if any(marker in normalized for marker in opt_out_markers):
         return "opt_out"
+
+    send_link_markers = (
+        "send link",
+        "sms link",
+        "send sms",
+        "text me",
+        "message me",
+        "link bhejo",
+        "sms bhejo",
+        "लिंक भेजो",
+        "लिंक भेज दीजिए",
+        "sms भेजो",
+        "मैसेज भेजो",
+    )
+    if any(marker in normalized for marker in send_link_markers):
+        return "send_link"
 
     callback_markers = (
         "busy",
@@ -655,7 +712,7 @@ def detect_consent_choice(text: str) -> ConsentChoice:
 def next_phase_after_consent(choice: ConsentChoice = "granted") -> CallPhase:
     if choice == "granted":
         return LANGUAGE_SELECTION
-    if choice in {"callback", "opt_out"}:
+    if choice in {"callback", "send_link", "opt_out"}:
         return CLOSING
     return CONSENT_CHECK
 
@@ -682,6 +739,29 @@ def _normalize_choice_text(text: str) -> str:
     normalized = re.sub(r"[^\w\s\u0900-\u097F]", " ", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
+
+
+def _looks_like_identity_name_confirmation(normalized_text: str) -> bool:
+    # Accept "my name is ..." style replies.
+    if any(marker in normalized_text for marker in ("मेरा नाम", "mera naam", "my name", "name is")):
+        return True
+
+    # Name-like replies should not contain digits.
+    if any(char.isdigit() for char in normalized_text):
+        return False
+
+    tokens = normalized_text.split()
+    if not tokens or len(tokens) > 3:
+        return False
+    if any(token in IDENTITY_NAME_STOPWORDS for token in tokens):
+        return False
+
+    # Require alphabetic words (Latin/Devanagari) to avoid treating random symbols as names.
+    if not all(token.isalpha() for token in tokens):
+        return False
+    if any(len(token) < 2 for token in tokens):
+        return False
+    return any(len(token) >= 3 for token in tokens)
 
 
 def _contains_latin_text(text: str) -> bool:

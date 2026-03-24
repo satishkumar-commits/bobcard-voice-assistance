@@ -7,6 +7,7 @@ from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.issue_guidance import (
+    build_process_resume_context_reply,
     build_issue_help_reply,
     build_issue_follow_up_question,
     build_issue_resolution_reply,
@@ -438,6 +439,15 @@ class ConversationService:
         )
         if early_state_reply is not None:
             return early_state_reply
+
+        if self._looks_like_call_purpose_question(transcript):
+            await self.add_transcript(call, "customer", transcript)
+            self.audio_quality_service.register_success(call.call_sid, transcript)
+            await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
+            self.issue_resolution_service.clear_issue(call.call_sid)
+            await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
+            reply_text = f"{build_process_resume_context_reply(language=prompt_language)} {build_issue_capture_prompt(prompt_language)}"
+            return await self._build_text_turn(call, reply_text, outcome="context-recap")
 
         _, vad_decision = self.vad_service.evaluate_turn(
             call_sid=call.call_sid,
@@ -912,6 +922,11 @@ class ConversationService:
             self.audio_quality_service.register_success(call.call_sid, transcript)
             await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
 
+            if self._looks_like_call_purpose_question(transcript):
+                await self._set_business_state(call.call_sid, CONSENT_CHECK)
+                reply_text = f"{build_process_resume_context_reply(language=prompt_language)} {build_consent_reprompt(prompt_language)}"
+                return await self._build_text_turn(call, reply_text, outcome="context-recap")
+
             if consent_choice == "granted":
                 if selected_language and call.language != selected_language:
                     call.language = selected_language
@@ -935,6 +950,15 @@ class ConversationService:
                     build_callback_ack(prompt_language),
                     should_hangup=True,
                     outcome="callback-requested",
+                )
+
+            if consent_choice == "send_link":
+                await self._set_business_state(call.call_sid, CONFIRMATION_CLOSING)
+                return await self._build_text_turn(
+                    call,
+                    build_sms_link_ack(prompt_language),
+                    should_hangup=True,
+                    outcome="sms-link-requested",
                 )
 
             if consent_choice == "opt_out":
@@ -1018,6 +1042,34 @@ class ConversationService:
     @staticmethod
     def _wants_to_end_call(text: str) -> bool:
         return wants_goodbye(text)
+
+    @staticmethod
+    def _looks_like_call_purpose_question(text: str) -> bool:
+        normalized = normalize_issue_text(text)
+        if not normalized:
+            return False
+        markers = (
+            "why are you calling",
+            "why did you call",
+            "reason for call",
+            "purpose of call",
+            "what is this call about",
+            "why this call",
+            "call kyun",
+            "call kyu",
+            "kis liye call",
+            "kisliye call",
+            "कॉल क्यों",
+            "क्यों कॉल",
+            "किस लिए कॉल",
+            "किसलिए कॉल",
+            "किस लिए फोन",
+            "क्यों फोन",
+            "कॉल किस लिए",
+            "आपने कॉल क्यों किया",
+            "आपने किस लिए कॉल किया",
+        )
+        return any(marker in normalized for marker in markers)
 
     @staticmethod
     def _looks_like_issue_resolved(text: str) -> bool:
@@ -1249,7 +1301,7 @@ class ConversationService:
             return False
         if is_simple_acknowledgement(transcript):
             return False
-        if consent_choice in {"callback", "opt_out"}:
+        if consent_choice in {"callback", "send_link", "opt_out"}:
             return False
         if is_opening_response(transcript) and consent_choice != "granted":
             return False
@@ -1389,7 +1441,7 @@ class ConversationService:
         transcript_reliable: bool,
         response_style: str,
     ) -> dict[str, object]:
-        issue_type = detect_issue_type(transcript) or issue_state.issue_type
+        issue_type = self._resolve_issue_type_for_turn(transcript, issue_state.issue_type)
         symptom = detect_issue_symptom(transcript)
         escalation_requested = detect_escalation_request(transcript)
         goodbye_requested = self._wants_to_end_call(transcript)
@@ -1397,6 +1449,8 @@ class ConversationService:
         audio_state = self.audio_quality_service.get_state(call.call_sid)
         if consent_choice == "opt_out":
             primary_intent = "opt_out"
+        elif consent_choice == "send_link":
+            primary_intent = "send_link"
         elif consent_choice == "callback":
             primary_intent = "callback"
         elif escalation_requested:
@@ -1438,6 +1492,42 @@ class ConversationService:
             "noisy_call": audio_state.noise_flag,
             "fallback_mode": audio_state.fallback_mode,
         }
+
+    def _resolve_issue_type_for_turn(self, transcript: str, active_issue_type: str | None) -> str | None:
+        detected_issue_type = detect_issue_type(transcript)
+        if detected_issue_type:
+            return detected_issue_type
+
+        if not active_issue_type:
+            return None
+
+        normalized = normalize_issue_text(transcript)
+        if not normalized:
+            return active_issue_type
+        if self._looks_like_call_purpose_question(transcript):
+            return None
+
+        if detect_issue_symptom(transcript):
+            return active_issue_type
+        if is_simple_acknowledgement(transcript) or looks_like_repeated_acknowledgement(transcript):
+            return active_issue_type
+
+        continuation_markers = (
+            "same issue",
+            "same problem",
+            "same error",
+            "same one",
+            "same thing",
+            "वही दिक्कत",
+            "वही समस्या",
+            "वही issue",
+            "उसी में",
+        )
+        if any(marker in normalized for marker in continuation_markers):
+            return active_issue_type
+        if len(normalized.split()) <= 3:
+            return active_issue_type
+        return None
 
     def _build_response_plan(
         self,
@@ -1547,7 +1637,13 @@ class ConversationService:
                 )
                 if use_gemini:
                     response_source = "gemini"
-        elif issue_state.issue_type and len(transcript.split()) <= 4 and not is_simple_acknowledgement(transcript):
+        elif (
+            issue_type
+            and issue_state.issue_type
+            and len(transcript.split()) <= 4
+            and not is_simple_acknowledgement(transcript)
+            and not self._looks_like_call_purpose_question(transcript)
+        ):
             route = "guided_followup"
             objective = "Use Gemini to continue a guided issue follow-up."
             response_source = "gemini"
@@ -1572,7 +1668,7 @@ class ConversationService:
             "should_hangup": should_hangup,
             "use_gemini": use_gemini,
             "close_after_resolution": close_after_resolution,
-            "issue_type": issue_type or issue_state.issue_type,
+            "issue_type": issue_type,
             "symptom": symptom,
             "language": prompt_language,
             "response_style": main_points.get("response_style"),

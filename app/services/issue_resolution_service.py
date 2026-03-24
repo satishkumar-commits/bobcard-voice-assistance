@@ -70,6 +70,13 @@ class IssueResolutionService:
         state.post_resolution_check_pending = False
         return state
 
+    def clear_issue(self, call_sid: str) -> IssueResolutionState:
+        state = self.get_state(call_sid)
+        state.issue_type = None
+        state.symptom = None
+        state.follow_up_count = 0
+        return state
+
     def reset(self, call_sid: str) -> None:
         self._states.pop(call_sid, None)
 

@@ -1,6 +1,6 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -104,6 +104,15 @@ async def get_call_conversation(
         )
         for row in rows
     ]
+
+
+@router.get("/calls/{call_sid}/latency-logs", response_model=list[dict[str, Any]])
+async def get_call_latency_logs(
+    call_sid: str,
+    limit: int = Query(default=500, ge=1, le=5000),
+) -> list[dict[str, Any]]:
+    realtime_service = get_realtime_service()
+    return await realtime_service.load_persisted_latency_events(call_sid, limit)
 
 
 @router.post("/sessions", response_model=WebRTCSessionRead, status_code=status.HTTP_201_CREATED)

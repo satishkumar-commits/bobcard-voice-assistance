@@ -11,6 +11,9 @@ const elements = {
   sttMetric: document.getElementById("sttMetric"),
   geminiMetric: document.getElementById("geminiMetric"),
   ttsMetric: document.getElementById("ttsMetric"),
+  callDurationMetric: document.getElementById("callDurationMetric"),
+  geminiOutputMetric: document.getElementById("geminiOutputMetric"),
+  savedLogMetric: document.getElementById("savedLogMetric"),
   autoScrollToggle: document.getElementById("autoScrollToggle"),
 };
 
@@ -20,6 +23,10 @@ const baseUrl = window.location.origin;
 let realtimeSocket = null;
 let activeCallSid = "";
 let latencyRows = [];
+let activeCallStartedAt = "";
+let activeCallEndedAt = "";
+let latestTimerSeconds = null;
+let persistedLogRequestToken = 0;
 
 function setWsState(state) {
   if (!elements.wsState) {
@@ -75,8 +82,24 @@ function connectRealtime() {
     const event = JSON.parse(message.data);
     if (event.type === "snapshot") {
       if (event.call_sid === activeCallSid) {
+        applyCallSnapshot(event.call_state);
         mergeLatencyEvents(event.latency_events || []);
       }
+      return;
+    }
+
+    if (event.type === "timer") {
+      handleTimerEvent(event);
+      return;
+    }
+
+    if (event.type === "call_status") {
+      handleCallStatusEvent(event);
+      return;
+    }
+
+    if (event.type === "call_summary") {
+      handleCallSummaryEvent(event);
       return;
     }
 
@@ -98,10 +121,17 @@ function subscribeToCall(callSid) {
     }
   }
   latencyRows = [];
+  activeCallStartedAt = "";
+  activeCallEndedAt = "";
+  latestTimerSeconds = null;
   setMetric(elements.sttMetric, "-");
   setMetric(elements.geminiMetric, "-");
   setMetric(elements.ttsMetric, "-");
+  setMetric(elements.callDurationMetric, "-");
+  setMetric(elements.geminiOutputMetric, "-");
+  setMetric(elements.savedLogMetric, normalized ? "loading..." : "live only");
   setActiveCall(normalized);
+  void loadPersistedLatencyLogs(normalized);
 }
 
 function mergeLatencyEvents(events) {
@@ -109,6 +139,78 @@ function mergeLatencyEvents(events) {
     addLatencyEvent(event, false);
   }
   renderLatencyTable();
+}
+
+function applyCallSnapshot(callState) {
+  if (!activeCallSid) {
+    return;
+  }
+  if (!callState || typeof callState !== "object") {
+    return;
+  }
+  activeCallStartedAt = callState.started_at || "";
+  activeCallEndedAt = callState.ended_at || "";
+  const summaryDuration = callState.call_summary?.duration_seconds;
+  if (typeof summaryDuration === "number") {
+    latestTimerSeconds = summaryDuration;
+  }
+  updateDurationMetric();
+}
+
+function handleTimerEvent(event) {
+  if (!activeCallSid || event.call_sid !== activeCallSid) {
+    return;
+  }
+  if (typeof event.elapsed_seconds === "number") {
+    latestTimerSeconds = event.elapsed_seconds;
+    setMetric(elements.callDurationMetric, formatDuration(event.elapsed_seconds));
+  }
+}
+
+function handleCallStatusEvent(event) {
+  if (!activeCallSid || event.call_sid !== activeCallSid) {
+    return;
+  }
+  activeCallStartedAt = event.started_at || activeCallStartedAt;
+  activeCallEndedAt = event.ended_at || activeCallEndedAt;
+  if (activeCallEndedAt) {
+    latestTimerSeconds = null;
+  }
+  updateDurationMetric();
+}
+
+function handleCallSummaryEvent(event) {
+  if (!activeCallSid || event.call_sid !== activeCallSid) {
+    return;
+  }
+  const durationSeconds = event.call_summary?.duration_seconds;
+  if (typeof durationSeconds === "number") {
+    latestTimerSeconds = durationSeconds;
+    setMetric(elements.callDurationMetric, formatDuration(durationSeconds));
+    return;
+  }
+  updateDurationMetric();
+}
+
+function updateDurationMetric() {
+  if (!activeCallSid) {
+    setMetric(elements.callDurationMetric, "-");
+    return;
+  }
+  if (typeof latestTimerSeconds === "number") {
+    setMetric(elements.callDurationMetric, formatDuration(latestTimerSeconds));
+    return;
+  }
+
+  const startedMs = parseIsoToMillis(activeCallStartedAt);
+  if (startedMs == null) {
+    setMetric(elements.callDurationMetric, "-");
+    return;
+  }
+  const endedMs = parseIsoToMillis(activeCallEndedAt);
+  const endMs = endedMs == null ? Date.now() : endedMs;
+  const durationSeconds = Math.max(0, Math.floor((endMs - startedMs) / 1000));
+  setMetric(elements.callDurationMetric, formatDuration(durationSeconds));
 }
 
 function addLatencyEvent(event, rerender = true) {
@@ -142,6 +244,16 @@ function updateMetrics(event) {
   }
   if (event.step === "gemini" && event.latency_ms != null) {
     setMetric(elements.geminiMetric, `${event.latency_ms} ms`);
+    const geminiOutputParts = [];
+    if (event.output_tokens != null) {
+      geminiOutputParts.push(`${event.output_tokens} tok`);
+    }
+    if (event.output_words != null) {
+      geminiOutputParts.push(`${event.output_words} words`);
+    }
+    if (geminiOutputParts.length) {
+      setMetric(elements.geminiOutputMetric, geminiOutputParts.join(" / "));
+    }
   }
   if ((event.step === "sarvam_tts" || event.step === "sarvam_tts_cache") && event.latency_ms != null) {
     setMetric(elements.ttsMetric, `${event.latency_ms} ms`);
@@ -226,11 +338,62 @@ function formatTime(value) {
   return `${date.toLocaleTimeString()}.${String(date.getMilliseconds()).padStart(3, "0")}`;
 }
 
+function parseIsoToMillis(value) {
+  if (!value) {
+    return null;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  return date.getTime();
+}
+
+function formatDuration(totalSeconds) {
+  const safeSeconds = Math.max(0, Math.floor(totalSeconds || 0));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const seconds = safeSeconds % 60;
+  if (hours > 0) {
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
+}
+
+async function loadPersistedLatencyLogs(callSid) {
+  const normalized = (callSid || "").trim();
+  const requestToken = ++persistedLogRequestToken;
+
+  if (!normalized) {
+    setMetric(elements.savedLogMetric, "live only");
+    return;
+  }
+
+  try {
+    const response = await fetch(`${baseUrl}/api/webrtc/calls/${encodeURIComponent(normalized)}/latency-logs?limit=500`);
+    if (requestToken !== persistedLogRequestToken) {
+      return;
+    }
+    if (!response.ok) {
+      setMetric(elements.savedLogMetric, "unavailable");
+      return;
+    }
+    const events = await response.json();
+    if (requestToken !== persistedLogRequestToken) {
+      return;
+    }
+    mergeLatencyEvents(Array.isArray(events) ? events : []);
+    setMetric(elements.savedLogMetric, `${Array.isArray(events) ? events.length : 0} loaded`);
+  } catch {
+    setMetric(elements.savedLogMetric, "unavailable");
+  }
 }
 
 async function loadRecentCalls() {

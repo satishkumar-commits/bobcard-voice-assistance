@@ -1,9 +1,10 @@
+import asyncio
 import logging
 import base64
 import io
 import wave
 from dataclasses import dataclass
-from time import perf_counter
+from time import monotonic, perf_counter
 
 import httpx
 
@@ -40,6 +41,7 @@ class STTResult:
 class SarvamSTTService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._streaming_cooldown_until: dict[str, float] = {}
         self._streaming_client = (
             AsyncSarvamAI(api_subscription_key=settings.sarvam_api_key)
             if settings.sarvam_api_key and settings.sarvam_stt_use_streaming and AsyncSarvamAI is not None
@@ -55,17 +57,43 @@ class SarvamSTTService:
         call_sid: str = "",
     ) -> STTResult:
         sample_rate = self._extract_sample_rate(audio_bytes, content_type)
-        if self._streaming_client and content_type == "audio/wav":
+        streaming_allowed = self._can_use_streaming(call_sid)
+        if self._streaming_client and content_type == "audio/wav" and streaming_allowed:
             try:
-                payload = await self._transcribe_via_streaming(
-                    audio_bytes=audio_bytes,
-                    sample_rate=sample_rate,
-                    language_code=language_code,
-                    call_sid=call_sid,
+                payload = await asyncio.wait_for(
+                    self._transcribe_via_streaming(
+                        audio_bytes=audio_bytes,
+                        sample_rate=sample_rate,
+                        language_code=language_code,
+                        call_sid=call_sid,
+                    ),
+                    timeout=max(2.0, self.settings.sarvam_stt_streaming_total_timeout_seconds),
                 )
                 return self._build_result(payload, audio_bytes, language_code)
             except Exception as exc:  # pragma: no cover - network/provider fallback
-                logger.warning("Sarvam streaming STT failed, falling back to REST: %s", exc)
+                self._activate_streaming_cooldown(call_sid)
+                logger.warning(
+                    "Sarvam streaming STT failed, falling back to REST: error_type=%s detail=%r",
+                    type(exc).__name__,
+                    exc,
+                )
+                emit_latency_event(
+                    {
+                        "step": "sarvam_stt_streaming_fallback",
+                        "call_sid": call_sid,
+                        "event_timestamp": utc_now_iso(),
+                        "error_type": type(exc).__name__,
+                    }
+                )
+        elif self._streaming_client and content_type == "audio/wav" and not streaming_allowed:
+            emit_latency_event(
+                {
+                    "step": "sarvam_stt_streaming_skipped",
+                    "call_sid": call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "reason": "cooldown",
+                }
+            )
 
         payload = await self._transcribe_via_rest(
             audio_bytes=audio_bytes,
@@ -75,6 +103,23 @@ class SarvamSTTService:
             call_sid=call_sid,
         )
         return self._build_result(payload, audio_bytes, language_code)
+
+    def _can_use_streaming(self, call_sid: str) -> bool:
+        if not call_sid:
+            return True
+        cooldown_until = self._streaming_cooldown_until.get(call_sid)
+        if cooldown_until is None:
+            return True
+        if monotonic() >= cooldown_until:
+            self._streaming_cooldown_until.pop(call_sid, None)
+            return True
+        return False
+
+    def _activate_streaming_cooldown(self, call_sid: str) -> None:
+        if not call_sid:
+            return
+        cooldown_seconds = max(1.0, self.settings.sarvam_stt_streaming_cooldown_seconds)
+        self._streaming_cooldown_until[call_sid] = monotonic() + cooldown_seconds
 
     async def _transcribe_via_rest(
         self,
@@ -92,7 +137,7 @@ class SarvamSTTService:
         }
         files = {"file": (filename, audio_bytes, content_type)}
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=max(2.0, self.settings.sarvam_stt_rest_timeout_seconds)) as client:
             request_sent_at = utc_now_iso()
             started_at = perf_counter()
             response = await client.post(
@@ -152,7 +197,10 @@ class SarvamSTTService:
             )
 
             for _ in range(4):
-                response = await ws.recv()
+                response = await asyncio.wait_for(
+                    ws.recv(),
+                    timeout=max(1.0, self.settings.sarvam_stt_streaming_recv_timeout_seconds),
+                )
                 payload = self._coerce_streaming_payload(response)
                 response_type = payload.get("type")
                 data = payload.get("data") if isinstance(payload.get("data"), dict) else {}

@@ -30,16 +30,23 @@ The core conversation logic is managed by a state machine defined by the `CallPh
 
 1.  **`opening`**
     -   **Trigger**: A new call stream starts.
-    -   **Action**: The `ConversationService` calls `build_opening_greeting` to create a personalized greeting.
+    -   **Action**: The `ConversationService` calls `build_opening_greeting` to create a personalized compliance-first greeting.
+    -   **Mandatory disclosure content**:
+        -   AI disclosure (assistant identifies as AI)
+        -   Bank identity (Bank of Baroda / BOBCards)
+        -   Purpose (credit card application continuation)
+        -   Recording notice
     -   **Audio**: The greeting is synthesized and played to the user.
     -   **Next Phase**: `consent_check`.
 
 2.  **`consent_check`**
     -   **Trigger**: The opening greeting finishes playing. The user responds.
-    -   **Action**: The user's speech is transcribed. The `detect_consent_choice` function analyzes the text to determine if consent is "granted", "callback", or "opt_out".
+    -   **Action**: The user's speech is transcribed. The `detect_consent_choice` function analyzes the text to determine if consent is "granted", "callback", "send_link", or "opt_out".
     -   **Logic**:
         -   If "granted", the call proceeds.
-        -   If "callback" or "opt_out", a closing message is prepared.
+        -   If "callback", a callback acknowledgment is prepared and call is closed.
+        -   If "send_link", an SMS-link acknowledgment is prepared and call is closed.
+        -   If "opt_out", opt-out is recorded and call is closed.
         -   If the response is unclear, `build_consent_reprompt` is used to ask again.
     -   **Next Phase**: Determined by `next_phase_after_consent`. It's either `language_selection` (on consent) or `closing`.
 

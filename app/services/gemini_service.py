@@ -2,6 +2,7 @@ import logging
 import re
 from dataclasses import dataclass
 from time import perf_counter
+from typing import Any
 
 import httpx
 
@@ -110,10 +111,10 @@ class GeminiService:
             },
         }
         headers = {"x-goog-api-key": self.settings.gemini_api_key}
+        request_sent_at = utc_now_iso()
 
         try:
             started_at = perf_counter()
-            request_sent_at = utc_now_iso()
             async with httpx.AsyncClient(timeout=18.0) as client:
                 response = await client.post(
                     f"{self.settings.gemini_base_url}/models/{self.settings.gemini_model}:generateContent",
@@ -122,24 +123,8 @@ class GeminiService:
                 )
                 response.raise_for_status()
                 data = response.json()
-            logger.info(
-                "Latency step=gemini call=%s request_sent_at=%s response_received_at=%s latency_ms=%s language=%s",
-                call_sid or "unknown",
-                request_sent_at,
-                utc_now_iso(),
-                int((perf_counter() - started_at) * 1000),
-                preferred_language,
-            )
-            emit_latency_event(
-                {
-                    "step": "gemini",
-                    "call_sid": call_sid,
-                    "request_sent_at": request_sent_at,
-                    "response_received_at": utc_now_iso(),
-                    "latency_ms": int((perf_counter() - started_at) * 1000),
-                    "language": preferred_language,
-                }
-            )
+            response_received_at = utc_now_iso()
+            latency_ms = int((perf_counter() - started_at) * 1000)
         except httpx.HTTPError as exc:
             logger.exception("Gemini request failed: %s", exc)
             return self._fallback_decision(
@@ -152,11 +137,24 @@ class GeminiService:
                 active_issue_type=active_issue_type,
             )
 
+        prompt_tokens, output_tokens, total_tokens = self._extract_usage_tokens(data)
+
         try:
             parts = data["candidates"][0]["content"]["parts"]
             text = " ".join(part.get("text", "") for part in parts).strip()
         except (KeyError, IndexError, TypeError):
             logger.warning("Gemini returned an unexpected payload: %s", data)
+            self._emit_gemini_latency_event(
+                call_sid=call_sid,
+                request_sent_at=request_sent_at,
+                response_received_at=response_received_at,
+                latency_ms=latency_ms,
+                language=preferred_language,
+                prompt_tokens=prompt_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                output_words=None,
+            )
             return self._fallback_decision(
                 reason="invalid_payload",
                 latest_user_text=latest_user_text,
@@ -167,6 +165,18 @@ class GeminiService:
                 active_issue_type=active_issue_type,
             )
 
+        self._emit_gemini_latency_event(
+            call_sid=call_sid,
+            request_sent_at=request_sent_at,
+            response_received_at=response_received_at,
+            latency_ms=latency_ms,
+            language=preferred_language,
+            prompt_tokens=prompt_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            output_words=self._count_words(text),
+        )
+
         return self._normalize_reply(
             text,
             preferred_language,
@@ -174,6 +184,77 @@ class GeminiService:
             response_mode,
             response_style,
             active_issue_type=active_issue_type,
+        )
+
+    @staticmethod
+    def _extract_usage_tokens(data: dict[str, Any]) -> tuple[int | None, int | None, int | None]:
+        usage = data.get("usageMetadata")
+        if not isinstance(usage, dict):
+            return None, None, None
+
+        prompt_tokens = GeminiService._to_int(usage.get("promptTokenCount"))
+        output_tokens = GeminiService._to_int(
+            usage.get("candidatesTokenCount") or usage.get("candidateTokenCount") or usage.get("outputTokenCount")
+        )
+        total_tokens = GeminiService._to_int(usage.get("totalTokenCount"))
+        return prompt_tokens, output_tokens, total_tokens
+
+    @staticmethod
+    def _to_int(value: Any) -> int | None:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+        return None
+
+    @staticmethod
+    def _count_words(text: str) -> int | None:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return None
+        return len(re.findall(r"\S+", cleaned))
+
+    @staticmethod
+    def _emit_gemini_latency_event(
+        *,
+        call_sid: str,
+        request_sent_at: str,
+        response_received_at: str,
+        latency_ms: int,
+        language: str,
+        prompt_tokens: int | None,
+        output_tokens: int | None,
+        total_tokens: int | None,
+        output_words: int | None,
+    ) -> None:
+        logger.info(
+            (
+                "Latency step=gemini call=%s request_sent_at=%s response_received_at=%s latency_ms=%s "
+                "language=%s prompt_tokens=%s output_tokens=%s output_words=%s total_tokens=%s"
+            ),
+            call_sid or "unknown",
+            request_sent_at,
+            response_received_at,
+            latency_ms,
+            language,
+            prompt_tokens if prompt_tokens is not None else "-",
+            output_tokens if output_tokens is not None else "-",
+            output_words if output_words is not None else "-",
+            total_tokens if total_tokens is not None else "-",
+        )
+        emit_latency_event(
+            {
+                "step": "gemini",
+                "call_sid": call_sid,
+                "request_sent_at": request_sent_at,
+                "response_received_at": response_received_at,
+                "latency_ms": latency_ms,
+                "language": language,
+                "prompt_tokens": prompt_tokens,
+                "output_tokens": output_tokens,
+                "output_words": output_words,
+                "total_tokens": total_tokens,
+            }
         )
 
     @staticmethod

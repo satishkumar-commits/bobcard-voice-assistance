@@ -1,11 +1,17 @@
 import asyncio
 import contextlib
+import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import WebSocket
+
+from app.core.config import get_settings
+from app.utils.helpers import ensure_directory
 
 
 logger = logging.getLogger(__name__)
@@ -29,13 +35,15 @@ class ConnectionState:
 
 
 class RealtimeService:
-    def __init__(self) -> None:
+    def __init__(self, latency_log_dir: Path | None = None) -> None:
         self._connections: dict[int, ConnectionState] = {}
         self._call_state: dict[str, dict[str, Any]] = {}
         self._transcript_history: dict[str, list[dict[str, Any]]] = {}
         self._latency_history: dict[str, list[dict[str, Any]]] = {}
         self._global_latency_history: list[dict[str, Any]] = []
         self._speaking_state: dict[str, dict[str, bool]] = {}
+        self._latency_log_dir = latency_log_dir or Path("data/latency_logs")
+        ensure_directory(self._latency_log_dir)
         self._lock = asyncio.Lock()
 
     async def connect(self, websocket: WebSocket) -> None:
@@ -358,7 +366,16 @@ class RealtimeService:
             self._latency_history.setdefault(call_sid, []).append(latency_event)
             self._latency_history[call_sid] = self._latency_history[call_sid][-200:]
 
+        try:
+            await asyncio.to_thread(self._append_latency_log, latency_event)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to persist latency event: %s", exc)
+
         await self.broadcast_global_event(latency_event)
+
+    async def load_persisted_latency_events(self, call_sid: str, limit: int = 500) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(limit, 5000))
+        return await asyncio.to_thread(self._read_persisted_latency_events, call_sid, bounded_limit)
 
     async def publish_webrtc_session(self, call_sid: str | None, event: dict[str, Any]) -> None:
         if call_sid:
@@ -459,6 +476,40 @@ class RealtimeService:
     async def _send_json(self, websocket: WebSocket, payload: dict[str, Any]) -> None:
         await websocket.send_json(payload)
 
+    @staticmethod
+    def _safe_call_sid(call_sid: str | None) -> str:
+        if isinstance(call_sid, str) and call_sid.strip():
+            return re.sub(r"[^A-Za-z0-9_.-]", "_", call_sid.strip())
+        return "global"
+
+    def _latency_log_path(self, call_sid: str | None) -> Path:
+        return self._latency_log_dir / f"{self._safe_call_sid(call_sid)}.jsonl"
+
+    def _append_latency_log(self, latency_event: dict[str, Any]) -> None:
+        call_sid = latency_event.get("call_sid")
+        log_path = self._latency_log_path(call_sid if isinstance(call_sid, str) else None)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(latency_event, ensure_ascii=True) + "\n")
+
+    def _read_persisted_latency_events(self, call_sid: str, limit: int) -> list[dict[str, Any]]:
+        log_path = self._latency_log_path(call_sid)
+        if not log_path.exists():
+            return []
+
+        events: list[dict[str, Any]] = []
+        with log_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    events.append(payload)
+        return events[-limit:]
+
     async def _timer_loop(self, websocket: WebSocket, call_sid: str) -> None:
         while True:
             snapshot = self._call_state.get(call_sid)
@@ -498,7 +549,7 @@ class RealtimeService:
             await asyncio.sleep(1)
 
 
-_realtime_service = RealtimeService()
+_realtime_service = RealtimeService(latency_log_dir=get_settings().latency_logs_path)
 
 
 def get_realtime_service() -> RealtimeService:

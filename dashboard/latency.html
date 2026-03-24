@@ -19,17 +19,6 @@
           <span id="wsState" class="status-chip disconnected">disconnected</span>
         </div>
       </header>
-
-      <section class="control-row">
-        <label class="field">
-          <span>Filter by Call SID</span>
-          <input id="callSidFilter" type="text" placeholder="Leave empty to watch all calls" />
-        </label>
-        <button id="watchCallButton" class="primary-button" type="button">Watch Call</button>
-        <button id="clearFilterButton" class="secondary-button" type="button">Show All</button>
-        <button id="refreshCallsButton" class="secondary-button" type="button">Refresh Recent Calls</button>
-      </section>
-
       <section class="metrics-grid">
         <article class="metric-card">
           <span>Active Call</span>
@@ -46,6 +35,18 @@
         <article class="metric-card">
           <span>Last TTS</span>
           <strong id="ttsMetric">-</strong>
+        </article>
+        <article class="metric-card">
+          <span>Total Call Duration</span>
+          <strong id="callDurationMetric">-</strong>
+        </article>
+        <article class="metric-card">
+          <span>Gemini Output</span>
+          <strong id="geminiOutputMetric">-</strong>
+        </article>
+        <article class="metric-card">
+          <span>Saved Logs</span>
+          <strong id="savedLogMetric">-</strong>
         </article>
       </section>
 

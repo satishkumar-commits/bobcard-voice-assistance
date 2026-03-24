@@ -27,8 +27,10 @@ class TwilioService:
         to_number: str,
         customer_name: str = "",
         language: str = "en-IN",
+        public_url: str | None = None,
     ) -> str:
-        if not self.settings.public_url:
+        resolved_public_url = (public_url or self.settings.public_url).strip().rstrip("/")
+        if not resolved_public_url:
             raise ValueError("PUBLIC_URL is required to place outbound Twilio calls.")
         if not self.settings.twilio_account_sid or not self.settings.twilio_auth_token:
             raise ValueError("Twilio credentials are not configured.")
@@ -42,8 +44,8 @@ class TwilioService:
                 "language": language,
             }
         )
-        voice_url = f"{build_public_url(self.settings.public_url, f'{self.settings.api_prefix}/twilio/voice')}?{query}"
-        status_callback_url = build_public_url(self.settings.public_url, f"{self.settings.api_prefix}/twilio/status")
+        voice_url = f"{build_public_url(resolved_public_url, f'{self.settings.api_prefix}/twilio/voice')}?{query}"
+        status_callback_url = build_public_url(resolved_public_url, f"{self.settings.api_prefix}/twilio/status")
 
         request_sent_at = utc_now_iso()
         started_at = perf_counter()
@@ -75,12 +77,13 @@ class TwilioService:
         )
         return call.sid
 
-    def build_intro_response(self, greeting_audio_url: str, action_path: str) -> str:
+    def build_intro_response(self, greeting_audio_url: str, action_path: str, public_url: str | None = None) -> str:
+        resolved_public_url = (public_url or self.settings.public_url).strip().rstrip("/")
         response = VoiceResponse()
         response.append(Play(greeting_audio_url))
         response.append(
             Record(
-                action=build_public_url(self.settings.public_url, action_path),
+                action=build_public_url(resolved_public_url, action_path),
                 method="POST",
                 timeout=self.settings.recording_timeout_seconds,
                 max_length=self.settings.recording_max_length_seconds,
@@ -99,13 +102,15 @@ class TwilioService:
         language: str = "en-IN",
         customer_number: str = "",
         call_sid: str = "",
+        public_url: str | None = None,
     ) -> str:
+        resolved_public_url = (public_url or self.settings.public_url).strip().rstrip("/")
         response = Element("Response")
         connect = SubElement(response, "Connect")
         stream = SubElement(
             connect,
             "Stream",
-            url=build_websocket_url(self.settings.public_url, stream_path),
+            url=build_websocket_url(resolved_public_url, stream_path),
         )
         for name, value in {
             "customer_name": customer_name,
@@ -117,12 +122,13 @@ class TwilioService:
                 SubElement(stream, "Parameter", name=name, value=value)
         return '<?xml version="1.0" encoding="UTF-8"?>' + tostring(response, encoding="unicode")
 
-    def build_conversation_response(self, reply_audio_url: str, action_path: str) -> str:
+    def build_conversation_response(self, reply_audio_url: str, action_path: str, public_url: str | None = None) -> str:
+        resolved_public_url = (public_url or self.settings.public_url).strip().rstrip("/")
         response = VoiceResponse()
         response.append(Play(reply_audio_url))
         response.append(
             Record(
-                action=build_public_url(self.settings.public_url, action_path),
+                action=build_public_url(resolved_public_url, action_path),
                 method="POST",
                 timeout=self.settings.recording_timeout_seconds,
                 max_length=self.settings.recording_max_length_seconds,
