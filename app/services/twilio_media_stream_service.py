@@ -37,8 +37,9 @@ from app.services.conversation_service import ConversationReply, ConversationSer
 from app.services.gemini_service import GeminiService
 from app.services.issue_resolution_service import get_issue_resolution_service
 from app.services.realtime_service import RealtimeService, emit_latency_event, get_realtime_service
-from app.services.sarvam_stt_service import STTResult, SarvamSTTService
+from app.services.sarvam_stt_service import STTChunkStreamSession, STTResult, SarvamSTTService
 from app.services.sarvam_tts_service import SarvamTTSService
+from app.services.stream_vad_service import get_stream_vad_service
 from app.services.twilio_service import TwilioService
 from app.services.vad_service import get_vad_service
 from app.utils.helpers import sanitize_spoken_text, utc_now_iso
@@ -50,8 +51,14 @@ logger = logging.getLogger(__name__)
 @dataclass
 class QueuedUtterance:
     mulaw_audio: bytes
+    stt_mulaw_audio: bytes
+    stt_chunk_count: int
+    stt_result: STTResult | None
+    stt_transport: str
     speech_ms: int
     received_at: str
+    silence_detected_at: str | None
+    utterance_finalized_at: str
     enqueued_at_perf: float
 
 
@@ -78,6 +85,7 @@ class MediaStreamSession:
     processing_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     utterance_queue: asyncio.Queue[QueuedUtterance] | None = None
+    stt_chunk_stream: STTChunkStreamSession | None = None
     closed: bool = False
 
 
@@ -97,6 +105,7 @@ class TwilioMediaStreamService:
         self.gemini_service = GeminiService(settings)
         self.audio_quality_service = get_audio_quality_service(settings)
         self.vad_service = get_vad_service(settings)
+        self.stream_vad_service = get_stream_vad_service(settings)
         self.issue_resolution_service = get_issue_resolution_service()
         self._sessions: dict[int, MediaStreamSession] = {}
 
@@ -173,6 +182,16 @@ class TwilioMediaStreamService:
                 "language": session.language,
             }
         )
+        if self.settings.stream_stt_enable_micro_chunking:
+            session.stt_chunk_stream = await self.stt_service.open_stream(
+                call_sid=session.call_sid,
+                language_code=session.language,
+                sample_rate=8000,
+                frame_ms=self.settings.stream_webrtc_vad_frame_ms,
+                chunk_ms=self.settings.stream_stt_chunk_ms,
+                preroll_ms=self.settings.stream_stt_preroll_ms,
+                enable_persistent=self.settings.stream_stt_enable_persistent_connection,
+            )
         session.utterance_queue = asyncio.Queue(maxsize=self.settings.stream_utterance_queue_maxsize)
         session.processing_task = asyncio.create_task(self._consume_utterances(session))
         await self.realtime_service.publish_call_phase(session.call_sid, GREETING)
@@ -209,6 +228,8 @@ class TwilioMediaStreamService:
         frame_ms = self._frame_duration_ms(chunk)
         playback_active = bool(session.playback_task and not session.playback_task.done())
         is_speech = self._is_speech_frame(chunk, during_playback=playback_active)
+        if session.stt_chunk_stream is not None:
+            await self.stt_service.push_mulaw_frame(session.stt_chunk_stream, frame=chunk, is_speech=is_speech)
 
         if playback_active:
             if is_speech:
@@ -265,6 +286,17 @@ class TwilioMediaStreamService:
         utterance = bytes(session.inbound_buffer)
         speech_ms = session.speech_ms
         silence_detected = session.silence_ms >= self.settings.stream_vad_silence_ms
+        silence_detected_at = utc_now_iso() if silence_detected else None
+        utterance_finalized_at = utc_now_iso()
+        stt_mulaw_audio = b""
+        stt_chunk_count = 0
+        precomputed_stt: STTResult | None = None
+        stt_transport = "utterance-fallback"
+        if session.stt_chunk_stream is not None:
+            stt_mulaw_audio, stt_chunk_count, precomputed_stt, stt_transport = await self.stt_service.finalize_utterance_chunks(
+                session.stt_chunk_stream,
+                language_code=session.language,
+            )
         session.inbound_buffer.clear()
         session.speech_active = False
         session.speech_ms = 0
@@ -275,18 +307,88 @@ class TwilioMediaStreamService:
 
         if speech_ms < self.settings.stream_vad_min_speech_ms:
             logger.debug("Skipping short utterance for call=%s speech_ms=%s", session.call_sid, speech_ms)
+            if session.stt_chunk_stream is not None:
+                self.stt_service.discard_utterance_chunks(session.stt_chunk_stream)
             return
 
+        if stt_chunk_count:
+            logger.info(
+                "Latency step=stt_micro_chunks_ready call=%s timestamp=%s chunk_count=%s audio_bytes=%s",
+                session.call_sid,
+                utterance_finalized_at,
+                stt_chunk_count,
+                len(stt_mulaw_audio),
+            )
+            emit_latency_event(
+                {
+                    "step": "stt_micro_chunks_ready",
+                    "call_sid": session.call_sid,
+                    "event_timestamp": utterance_finalized_at,
+                    "chunk_count": stt_chunk_count,
+                    "audio_bytes": len(stt_mulaw_audio),
+                }
+            )
+
         if silence_detected:
+            logger.info(
+                "Latency step=stream_silence_detected call=%s timestamp=%s speech_ms=%s audio_bytes=%s",
+                session.call_sid,
+                silence_detected_at,
+                speech_ms,
+                len(utterance),
+            )
+            emit_latency_event(
+                {
+                    "step": "stream_silence_detected",
+                    "call_sid": session.call_sid,
+                    "event_timestamp": silence_detected_at,
+                    "speech_ms": speech_ms,
+                    "audio_bytes": len(utterance),
+                }
+            )
             await self.realtime_service.publish_call_phase(session.call_sid, SILENCE_DETECTED)
+        logger.info(
+            "Latency step=stream_utterance_finalized call=%s timestamp=%s speech_ms=%s audio_bytes=%s",
+            session.call_sid,
+            utterance_finalized_at,
+            speech_ms,
+            len(utterance),
+        )
+        emit_latency_event(
+            {
+                "step": "stream_utterance_finalized",
+                "call_sid": session.call_sid,
+                "event_timestamp": utterance_finalized_at,
+                "speech_ms": speech_ms,
+                "audio_bytes": len(utterance),
+                "silence_detected": silence_detected,
+            }
+        )
         await self.realtime_service.publish_call_phase(session.call_sid, UTTERANCE_FINALIZED)
-        await self._enqueue_utterance(session, utterance, speech_ms)
+        await self._enqueue_utterance(
+            session,
+            utterance,
+            stt_mulaw_audio=stt_mulaw_audio,
+            stt_chunk_count=stt_chunk_count,
+            stt_result=precomputed_stt,
+            stt_transport=stt_transport,
+            speech_ms=speech_ms,
+            silence_detected_at=silence_detected_at,
+            utterance_finalized_at=utterance_finalized_at,
+        )
 
     async def _enqueue_utterance(
         self,
         session: MediaStreamSession,
         mulaw_audio: bytes,
+        *,
+        stt_mulaw_audio: bytes,
+        stt_chunk_count: int,
+        stt_result: STTResult | None,
+        stt_transport: str,
         speech_ms: int,
+        silence_detected_at: str | None,
+        utterance_finalized_at: str,
     ) -> None:
         queue = session.utterance_queue
         if queue is None:
@@ -318,8 +420,14 @@ class TwilioMediaStreamService:
         queue.put_nowait(
             QueuedUtterance(
                 mulaw_audio=mulaw_audio,
+                stt_mulaw_audio=stt_mulaw_audio,
+                stt_chunk_count=stt_chunk_count,
+                stt_result=stt_result,
+                stt_transport=stt_transport,
                 speech_ms=speech_ms,
                 received_at=received_at,
+                silence_detected_at=silence_detected_at,
+                utterance_finalized_at=utterance_finalized_at,
                 enqueued_at_perf=perf_counter(),
             )
         )
@@ -399,64 +507,126 @@ class TwilioMediaStreamService:
                 }
             )
             await self.realtime_service.publish_call_phase(session.call_sid, TRANSCRIBING)
-            wav_audio = self._mulaw_to_wav(queued.mulaw_audio)
-            try:
-                stt_result = await asyncio.wait_for(
-                    self.stt_service.transcribe(
-                        audio_bytes=wav_audio,
-                        filename="twilio-stream.wav",
-                        content_type="audio/wav",
-                        language_code=session.language or "unknown",
-                        call_sid=session.call_sid,
-                    ),
-                    timeout=max(2.0, self.settings.stream_stt_turn_timeout_seconds),
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "STT turn timeout for call=%s speech_ms=%s; proceeding with empty transcript.",
+            selected_mulaw_audio = queued.stt_mulaw_audio or queued.mulaw_audio
+            used_micro_chunks = bool(queued.stt_mulaw_audio)
+            wav_audio = self._mulaw_to_wav(selected_mulaw_audio)
+            if used_micro_chunks:
+                logger.info(
+                    "Latency step=stt_micro_chunks_selected call=%s timestamp=%s chunk_count=%s audio_bytes=%s",
                     session.call_sid,
-                    queued.speech_ms,
+                    utc_now_iso(),
+                    queued.stt_chunk_count,
+                    len(selected_mulaw_audio),
                 )
                 emit_latency_event(
                     {
-                        "step": "stt_turn_timeout",
+                        "step": "stt_micro_chunks_selected",
                         "call_sid": session.call_sid,
                         "event_timestamp": utc_now_iso(),
-                        "speech_ms": queued.speech_ms,
-                        "audio_bytes": len(queued.mulaw_audio),
-                        "timeout_seconds": self.settings.stream_stt_turn_timeout_seconds,
+                        "chunk_count": queued.stt_chunk_count,
+                        "audio_bytes": len(selected_mulaw_audio),
                     }
                 )
-                stt_result = STTResult(
-                    transcript="",
-                    language_code=session.language,
-                    confidence=0.0,
-                    confidence_source="timeout",
-                    speech_detected=False,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "STT turn failed for call=%s speech_ms=%s; proceeding with empty transcript. error=%s",
+            if queued.stt_result is not None:
+                stt_result = queued.stt_result
+                logger.info(
+                    "Latency step=stt_transcript_reused call=%s timestamp=%s transport=%s chunk_count=%s",
                     session.call_sid,
-                    queued.speech_ms,
-                    exc,
+                    utc_now_iso(),
+                    queued.stt_transport,
+                    queued.stt_chunk_count,
                 )
                 emit_latency_event(
                     {
-                        "step": "stt_turn_failed",
+                        "step": "stt_transcript_reused",
                         "call_sid": session.call_sid,
                         "event_timestamp": utc_now_iso(),
-                        "speech_ms": queued.speech_ms,
-                        "audio_bytes": len(queued.mulaw_audio),
+                        "transport": queued.stt_transport,
+                        "chunk_count": queued.stt_chunk_count,
                     }
                 )
-                stt_result = STTResult(
-                    transcript="",
-                    language_code=session.language,
-                    confidence=0.0,
-                    confidence_source="error",
-                    speech_detected=False,
-                )
+            else:
+                try:
+                    stt_result = await asyncio.wait_for(
+                        self.stt_service.transcribe(
+                            audio_bytes=wav_audio,
+                            filename="twilio-stream.wav",
+                            content_type="audio/wav",
+                            language_code=session.language or "unknown",
+                            call_sid=session.call_sid,
+                        ),
+                        timeout=max(2.0, self.settings.stream_stt_turn_timeout_seconds),
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "STT turn timeout for call=%s speech_ms=%s; proceeding with empty transcript.",
+                        session.call_sid,
+                        queued.speech_ms,
+                    )
+                    emit_latency_event(
+                        {
+                            "step": "stt_turn_timeout",
+                            "call_sid": session.call_sid,
+                            "event_timestamp": utc_now_iso(),
+                            "speech_ms": queued.speech_ms,
+                            "audio_bytes": len(selected_mulaw_audio),
+                            "timeout_seconds": self.settings.stream_stt_turn_timeout_seconds,
+                        }
+                    )
+                    stt_result = STTResult(
+                        transcript="",
+                        language_code=session.language,
+                        confidence=0.0,
+                        confidence_source="timeout",
+                        speech_detected=False,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "STT turn failed for call=%s speech_ms=%s; proceeding with empty transcript. error=%s",
+                        session.call_sid,
+                        queued.speech_ms,
+                        exc,
+                    )
+                    emit_latency_event(
+                        {
+                            "step": "stt_turn_failed",
+                            "call_sid": session.call_sid,
+                            "event_timestamp": utc_now_iso(),
+                            "speech_ms": queued.speech_ms,
+                            "audio_bytes": len(selected_mulaw_audio),
+                        }
+                    )
+                    stt_result = STTResult(
+                        transcript="",
+                        language_code=session.language,
+                        confidence=0.0,
+                        confidence_source="error",
+                        speech_detected=False,
+                    )
+            stt_response_at = utc_now_iso()
+            silence_to_stt_ms = self._duration_ms(queued.silence_detected_at, stt_response_at)
+            finalized_to_stt_ms = self._duration_ms(queued.utterance_finalized_at, stt_response_at)
+            audio_to_stt_ms = self._duration_ms(queued.received_at, stt_response_at)
+            logger.info(
+                "Latency step=stt_transcript_ready call=%s timestamp=%s speech_ms=%s silence_to_stt_ms=%s finalized_to_stt_ms=%s audio_to_stt_ms=%s",
+                session.call_sid,
+                stt_response_at,
+                queued.speech_ms,
+                silence_to_stt_ms,
+                finalized_to_stt_ms,
+                audio_to_stt_ms,
+            )
+            emit_latency_event(
+                {
+                    "step": "stt_transcript_ready",
+                    "call_sid": session.call_sid,
+                    "event_timestamp": stt_response_at,
+                    "speech_ms": queued.speech_ms,
+                    "silence_to_stt_ms": silence_to_stt_ms,
+                    "finalized_to_stt_ms": finalized_to_stt_ms,
+                    "audio_to_stt_ms": audio_to_stt_ms,
+                }
+            )
             transcript = sanitize_spoken_text(stt_result.transcript)
 
             if transcript and session.playback_task and not session.playback_task.done():
@@ -701,6 +871,10 @@ class TwilioMediaStreamService:
             session.processing_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await session.processing_task
+        if session.stt_chunk_stream is not None:
+            with contextlib.suppress(Exception):
+                await self.stt_service.close_stream(session.stt_chunk_stream)
+            session.stt_chunk_stream = None
         if session.customer_speaking:
             await self.realtime_service.publish_speaking_event(session.call_sid, "customer", False)
         await self.realtime_service.publish_speaking_event(session.call_sid, "assistant", False)
@@ -827,13 +1001,7 @@ class TwilioMediaStreamService:
         return max(20, int((len(mulaw_audio) / 8000) * 1000))
 
     def _is_speech_frame(self, mulaw_audio: bytes, during_playback: bool = False) -> bool:
-        linear_pcm = audioop.ulaw2lin(mulaw_audio, 2)
-        rms = audioop.rms(linear_pcm, 2)
-        threshold = self.settings.stream_vad_rms_threshold
-        if during_playback:
-            # During playback, slightly lower threshold so real user interruption is picked up faster.
-            threshold = max(240, int(threshold * 0.85))
-        return rms >= threshold
+        return self.stream_vad_service.is_speech_frame(mulaw_audio, during_playback=during_playback)
 
     def _should_cancel_playback(self, session: MediaStreamSession) -> bool:
         if session.assistant_playback_started_at is None:
@@ -967,6 +1135,17 @@ class TwilioMediaStreamService:
         if process.returncode != 0:
             raise RuntimeError(f"ffmpeg transcoding failed: {stderr.decode('utf-8', 'ignore').strip()}")
         return stdout
+
+    @staticmethod
+    def _duration_ms(start_iso: str | None, end_iso: str | None) -> int | None:
+        if not start_iso or not end_iso:
+            return None
+        try:
+            started_at = datetime.fromisoformat(start_iso)
+            completed_at = datetime.fromisoformat(end_iso)
+        except ValueError:
+            return None
+        return max(0, int((completed_at - started_at).total_seconds() * 1000))
 
     @staticmethod
     def _now_iso() -> str:

@@ -1,6 +1,6 @@
 # BOBCards Voice Assistant
 
-A real-time phone voice assistant for BOBCards / Bank of Baroda built with FastAPI, Twilio Media Streams, Sarvam AI, Gemini, SQLite, and a live browser dashboard.
+A real-time phone voice assistant for BOBCards / BOBCards built with FastAPI, Twilio Media Streams, Sarvam AI, Gemini, SQLite, and a live browser dashboard.
 
 This project handles both inbound and outbound calls, streams live call audio over WebSocket, detects customer speech with server-side VAD, transcribes audio with Sarvam STT, generates guided banking replies with a hybrid rules + Gemini flow, converts replies back to speech with Sarvam TTS, and pushes the audio back into the same live call.
 
