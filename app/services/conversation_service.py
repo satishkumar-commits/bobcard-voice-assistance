@@ -70,7 +70,6 @@ from app.core.conversation_prompts import (
     detect_escalation_request,
     detect_resolution_choice,
     detect_consent_choice,
-    detect_language_preference,
     normalize_language,
     wants_goodbye,
 )
@@ -83,8 +82,7 @@ from app.services.sarvam_stt_service import SarvamSTTService
 from app.services.sarvam_tts_service import SarvamTTSService
 from app.services.twilio_service import TwilioService
 from app.services.vad_service import VADService
-from app.utils.helpers import build_public_url, contains_devanagari, infer_language_code, looks_like_hinglish, looks_like_romanized_hindi, sanitize_spoken_text
-from app.utils.helpers import apply_response_style, detect_response_style, utc_now_iso
+from app.utils.helpers import build_public_url, enforce_devanagari_hindi_reply, sanitize_spoken_text, utc_now_iso
 
 
 logger = logging.getLogger(__name__)
@@ -222,7 +220,7 @@ class ConversationService:
         customer_name: str = "",
         language: str | None = None,
     ) -> ConversationReply:
-        language_code = normalize_language(language or call.language)
+        language_code = "hi-IN"
         if call.language != language_code:
             call.language = language_code
             await self.session.commit()
@@ -385,30 +383,14 @@ class ConversationService:
             collapse_repeated_acknowledgement(transcript, current_language)
         )
         issue_state = self.issue_resolution_service.get_state(call.call_sid)
-        turn_language = infer_language_code(
-            transcript,
-            detected_language,
-            preferred_language=call.language,
-        )
-        prompt_language = turn_language
+        turn_language = "hi-IN"
+        prompt_language = "hi-IN"
         history = await self.get_recent_history(call.id)
         customer_turns = [item for item in history if item["speaker"] == "customer"]
         last_customer_text = customer_turns[-1]["text"] if customer_turns else ""
         consent_choice = detect_consent_choice(transcript)
-        selected_language = detect_language_preference(transcript)
-        should_stay_hindi = (
-            not selected_language
-            and (
-                contains_devanagari(transcript)
-                or looks_like_hinglish(transcript)
-                or looks_like_romanized_hindi(transcript)
-            )
-        )
-        if should_stay_hindi:
-            turn_language = "hi-IN"
-            prompt_language = "hi-IN"
-
-        response_style = detect_response_style(transcript, turn_language, issue_state.response_style)
+        selected_language = None
+        response_style = "default"
         self.issue_resolution_service.set_response_style(call.call_sid, response_style)
 
         if (
@@ -508,13 +490,7 @@ class ConversationService:
                 speech_detected=quality_assessment.speech_detected,
             )
 
-        response_language = infer_language_code(
-            transcript,
-            detected_language,
-            preferred_language=call.language,
-        )
-        if should_stay_hindi:
-            response_language = "hi-IN"
+        response_language = "hi-IN"
         if call.language != response_language:
             call.language = response_language
             await self.session.commit()
@@ -753,10 +729,8 @@ class ConversationService:
         should_hangup: bool = False,
         outcome: str | None = None,
     ) -> ConversationReply:
-        cleaned_text = sanitize_spoken_text(text)
-        language_code = infer_language_code(cleaned_text, preferred_language=call.language)
-        issue_state = self.issue_resolution_service.get_state(call.call_sid)
-        cleaned_text = apply_response_style(cleaned_text, language_code, issue_state.response_style)
+        cleaned_text = enforce_devanagari_hindi_reply(sanitize_spoken_text(text))
+        language_code = "hi-IN"
         logger.info(
             "Latency step=assistant_text_ready call=%s timestamp=%s language=%s text_preview=%s",
             call.call_sid,
@@ -1676,4 +1650,4 @@ class ConversationService:
 
     @staticmethod
     def _prompt_language(call: Call) -> str:
-        return normalize_language(call.language)
+        return "hi-IN"

@@ -68,7 +68,13 @@ class Settings(BaseSettings):
     stream_webrtc_vad_min_speech_ratio: float = 0.5
     stream_vad_silence_ms: int = 520
     stream_vad_min_speech_ms: int = 180
-    stream_vad_max_speech_ms: int = 9000
+    stream_vad_max_speech_ms: int = 7000
+    stream_stt_enable_micro_chunking: bool = True
+    stream_stt_chunk_ms: int = 200
+    stream_stt_preroll_ms: int = 40
+    stream_stt_enable_persistent_connection: bool = True
+    stream_stt_persistent_finalize_timeout_seconds: float = 1.2
+    stream_stt_persistent_finalize_max_messages: int = 3
     stream_stt_turn_timeout_seconds: float = 10.0
     stream_barge_in_grace_ms: int = 220
     stream_barge_in_min_playback_ms: int = 420

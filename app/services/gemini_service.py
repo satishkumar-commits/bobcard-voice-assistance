@@ -23,7 +23,7 @@ from app.core.issue_guidance import (
 )
 from app.core.prompts import BANKING_SYSTEM_PROMPT, HUMAN_HANDOFF_REPLY, build_conversation_prompt
 from app.services.realtime_service import emit_latency_event
-from app.utils.helpers import contains_devanagari, sanitize_spoken_text, utc_now_iso
+from app.utils.helpers import contains_devanagari, contains_latin, sanitize_spoken_text, utc_now_iso
 
 
 logger = logging.getLogger(__name__)
@@ -335,7 +335,7 @@ class GeminiService:
                 active_issue_type=active_issue_type,
             )
 
-        if language_code == "hi-IN" and response_style != "hinglish" and not contains_devanagari(cleaned):
+        if language_code == "hi-IN" and (not contains_devanagari(cleaned) or contains_latin(cleaned)):
             return GeminiService._fallback_decision(
                 reason="off_language_hi",
                 latest_user_text=latest_user_text,

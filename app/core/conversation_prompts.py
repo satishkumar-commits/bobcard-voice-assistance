@@ -229,12 +229,14 @@ def build_opening_greeting(
 ) -> str:
     language = normalize_language(language)
     clean_name = _normalize_name(name)
-    assistant_name = _normalize_name(agent_name) or "Maya"
+    assistant_name = _normalize_name(agent_name) or "माया"
+    if _contains_latin_text(assistant_name):
+        assistant_name = "माया"
     if language == "hi-IN":
+        salutation = _build_hindi_salutation(clean_name).rstrip("।")
         return (
-            f"{_build_hindi_salutation(clean_name)} मैं {assistant_name} हूँ, BOBCards की तरफ से एक AI voice assistant बोल रही हूँ। "
-            "यह कॉल quality aur training के लिए record हो रही है। "
-            "मैं आपकी BOBCards credit card application के बारे में call कर रही हूँ जो बीच में रुक गई थी। "
+            f"{salutation}, मैं {assistant_name} हूँ, बीओबी कार्ड्स की एआई वॉइस सहायक बोल रही हूँ। "
+            "यह कॉल गुणवत्ता के लिए रिकॉर्ड हो रही है और आपकी रुकी हुई बीओबी कार्ड आवेदन प्रक्रिया के बारे में है। "
             "क्या अभी दो मिनट बात करना ठीक रहेगा?"
         )
 
@@ -773,7 +775,9 @@ def _normalize_name(name: str) -> str:
 
 
 def _build_hindi_salutation(name: str) -> str:
-    return f"नमस्ते {name}।" if name else "नमस्ते।"
+    if not name or _contains_latin_text(name):
+        return "नमस्ते।"
+    return f"नमस्ते {name}।"
 
 
 def _build_hindi_ack(name: str) -> str:

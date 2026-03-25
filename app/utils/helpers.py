@@ -8,6 +8,7 @@ from uuid import uuid4
 DEVANAGARI_PATTERN = re.compile(r"[\u0900-\u097F]")
 BENGALI_PATTERN = re.compile(r"[\u0980-\u09FF]")
 LATIN_PATTERN = re.compile(r"[A-Za-z]")
+LATIN_WORD_PATTERN = re.compile(r"\b[A-Za-z]+\b")
 ROMANIZED_HINDI_HINTS = {
     "mujhe",
     "mera",
@@ -139,6 +140,58 @@ ENGLISH_WORD_HINTS = {
     "status",
 }
 
+DEVANAGARI_TECHNICAL_REPLACEMENTS = (
+    (re.compile(r"\bbobcards\b", re.IGNORECASE), "बीओबी कार्ड्स"),
+    (re.compile(r"\bbob\s*card\b", re.IGNORECASE), "बीओबी कार्ड"),
+    (re.compile(r"\bcredit\s*card\b", re.IGNORECASE), "क्रेडिट कार्ड"),
+    (re.compile(r"\botp\b", re.IGNORECASE), "ओटीपी"),
+    (re.compile(r"\btransaction\b", re.IGNORECASE), "ट्रांजैक्शन"),
+    (re.compile(r"\bapplication\b", re.IGNORECASE), "आवेदन"),
+    (re.compile(r"\bbanking\b", re.IGNORECASE), "बैंकिंग"),
+    (re.compile(r"\blog[\s-]*in\b", re.IGNORECASE), "लॉगिन"),
+    (re.compile(r"\bsign[\s-]*in\b", re.IGNORECASE), "साइन इन"),
+    (re.compile(r"\bpassword\b", re.IGNORECASE), "पासवर्ड"),
+    (re.compile(r"\bstatement\b", re.IGNORECASE), "स्टेटमेंट"),
+    (re.compile(r"\binvoice\b", re.IGNORECASE), "इनवॉइस"),
+    (re.compile(r"\brefund\b", re.IGNORECASE), "रिफंड"),
+    (re.compile(r"\bemi\b", re.IGNORECASE), "ईएमआई"),
+    (re.compile(r"\berror\b", re.IGNORECASE), "एरर"),
+    (re.compile(r"\bapp\b", re.IGNORECASE), "ऐप"),
+    (re.compile(r"\bupload\b", re.IGNORECASE), "अपलोड"),
+    (re.compile(r"\bdownload\b", re.IGNORECASE), "डाउनलोड"),
+    (re.compile(r"\bstatus\b", re.IGNORECASE), "स्थिति"),
+    (re.compile(r"\bstep\b", re.IGNORECASE), "चरण"),
+    (re.compile(r"\bprocess\b", re.IGNORECASE), "प्रक्रिया"),
+    (re.compile(r"\bsms\b", re.IGNORECASE), "एसएमएस"),
+    (re.compile(r"\blink\b", re.IGNORECASE), "लिंक"),
+    (re.compile(r"\bcallback\b", re.IGNORECASE), "कॉलबैक"),
+    (re.compile(r"\baadhaar\b|\baadhar\b", re.IGNORECASE), "आधार"),
+    (re.compile(r"\bpan\b", re.IGNORECASE), "पैन"),
+    (re.compile(r"\bphoto\b", re.IGNORECASE), "फोटो"),
+    (re.compile(r"\bblur\b", re.IGNORECASE), "धुंधली"),
+    (re.compile(r"\bhelp\b", re.IGNORECASE), "मदद"),
+    (re.compile(r"\bissue\b", re.IGNORECASE), "समस्या"),
+    (re.compile(r"\bai\b", re.IGNORECASE), "एआई"),
+    (re.compile(r"\bvoice\b", re.IGNORECASE), "वॉइस"),
+    (re.compile(r"\bassistant\b", re.IGNORECASE), "सहायक"),
+    (re.compile(r"\bquality\b", re.IGNORECASE), "गुणवत्ता"),
+    (re.compile(r"\btraining\b", re.IGNORECASE), "प्रशिक्षण"),
+    (re.compile(r"\brecord(?:ed|ing)?\b", re.IGNORECASE), "रिकॉर्ड"),
+    (re.compile(r"\bcall\b", re.IGNORECASE), "कॉल"),
+    (re.compile(r"\bexactly\b", re.IGNORECASE), "ठीक-ठीक"),
+    (re.compile(r"\baapko\b", re.IGNORECASE), "आपको"),
+    (re.compile(r"\bagar\b", re.IGNORECASE), "अगर"),
+    (re.compile(r"\baur\b", re.IGNORECASE), "और"),
+    (re.compile(r"\bkuch\b", re.IGNORECASE), "कुछ"),
+    (re.compile(r"\bchahiye\b", re.IGNORECASE), "चाहिए"),
+    (re.compile(r"\bbataiyega\b", re.IGNORECASE), "बताइएगा"),
+    (re.compile(r"\btoh\b", re.IGNORECASE), "तो"),
+    (re.compile(r"\bhai\b", re.IGNORECASE), "है"),
+    (re.compile(r"\bkarke\b", re.IGNORECASE), "करके"),
+    (re.compile(r"\bkhushi\b", re.IGNORECASE), "खुशी"),
+    (re.compile(r"\bhui\b", re.IGNORECASE), "हुई"),
+)
+
 
 def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
@@ -150,6 +203,10 @@ def contains_devanagari(text: str) -> bool:
 
 def contains_bengali(text: str) -> bool:
     return bool(BENGALI_PATTERN.search(text))
+
+
+def contains_latin(text: str) -> bool:
+    return bool(LATIN_PATTERN.search(text))
 
 
 def looks_like_romanized_hindi(text: str) -> bool:
@@ -280,6 +337,48 @@ def apply_response_style(text: str, language_code: str, response_style: str) -> 
     for source, target in replacements:
         styled = styled.replace(source, target)
     return styled
+
+
+def enforce_devanagari_hindi_reply(text: str, max_sentences: int = 3) -> str:
+    fallback = "मैं आपकी बीओबी कार्ड सहायता के लिए तैयार हूँ। कृपया अपनी समस्या संक्षेप में बताइए।"
+    cleaned = " ".join((text or "").strip().split())
+    if not cleaned:
+        return fallback
+
+    normalized = cleaned
+    for pattern, replacement in DEVANAGARI_TECHNICAL_REPLACEMENTS:
+        normalized = pattern.sub(replacement, normalized)
+
+    normalized = re.sub(r"[.]+", "।", normalized)
+    parts = [part.strip(" ,;:") for part in re.split(r"[।!?]+", normalized) if part.strip(" ,;:")]
+    if not parts:
+        return fallback
+
+    sentence_limit = max(1, min(max_sentences, 3))
+    normalized = "। ".join(parts[:sentence_limit]).strip(" ,;:")
+    if normalized and not normalized.endswith("।"):
+        normalized += "।"
+
+    if contains_latin(normalized):
+        for pattern, replacement in DEVANAGARI_TECHNICAL_REPLACEMENTS:
+            normalized = pattern.sub(replacement, normalized)
+        normalized = LATIN_WORD_PATTERN.sub("", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip(" ,;:")
+        if normalized and not normalized.endswith("।"):
+            normalized += "।"
+
+    normalized = re.sub(r"(।\s*){2,}", "। ", normalized).strip(" ,;:")
+    if normalized and not normalized.endswith("।"):
+        normalized += "।"
+
+    devanagari_words = re.findall(r"[\u0900-\u097F]+", normalized)
+    if len(devanagari_words) < 2:
+        return fallback
+
+    if not contains_devanagari(normalized):
+        return fallback
+
+    return sanitize_spoken_text(normalized, max_length=220)
 
 
 def sanitize_spoken_text(text: str, max_length: int = 280) -> str:
