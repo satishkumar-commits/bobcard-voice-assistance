@@ -44,6 +44,7 @@ class TwilioService:
                 "language": language,
             }
         )
+        
         voice_url = f"{build_public_url(resolved_public_url, f'{self.settings.api_prefix}/twilio/voice')}?{query}"
         status_callback_url = build_public_url(resolved_public_url, f"{self.settings.api_prefix}/twilio/status")
 

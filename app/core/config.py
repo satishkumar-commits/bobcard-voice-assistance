@@ -61,7 +61,11 @@ class Settings(BaseSettings):
     vad_min_audio_bytes: int = 8000
     noisy_call_retry_prompt_trigger: int = 2
     noisy_call_fallback_trigger: int = 3
+    stream_vad_backend: str = "webrtc"
     stream_vad_rms_threshold: int = 320
+    stream_webrtc_vad_aggressiveness: int = 2
+    stream_webrtc_vad_frame_ms: int = 20
+    stream_webrtc_vad_min_speech_ratio: float = 0.5
     stream_vad_silence_ms: int = 520
     stream_vad_min_speech_ms: int = 180
     stream_vad_max_speech_ms: int = 9000

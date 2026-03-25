@@ -33,7 +33,7 @@ The core conversation logic is managed by a state machine defined by the `CallPh
     -   **Action**: The `ConversationService` calls `build_opening_greeting` to create a personalized compliance-first greeting.
     -   **Mandatory disclosure content**:
         -   AI disclosure (assistant identifies as AI)
-        -   Bank identity (Bank of Baroda / BOBCards)
+        -   Bank identity (BOBCards / BOBCards)
         -   Purpose (credit card application continuation)
         -   Recording notice
     -   **Audio**: The greeting is synthesized and played to the user.

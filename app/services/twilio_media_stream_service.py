@@ -39,6 +39,7 @@ from app.services.issue_resolution_service import get_issue_resolution_service
 from app.services.realtime_service import RealtimeService, emit_latency_event, get_realtime_service
 from app.services.sarvam_stt_service import STTResult, SarvamSTTService
 from app.services.sarvam_tts_service import SarvamTTSService
+from app.services.stream_vad_service import get_stream_vad_service
 from app.services.twilio_service import TwilioService
 from app.services.vad_service import get_vad_service
 from app.utils.helpers import sanitize_spoken_text, utc_now_iso
@@ -97,6 +98,7 @@ class TwilioMediaStreamService:
         self.gemini_service = GeminiService(settings)
         self.audio_quality_service = get_audio_quality_service(settings)
         self.vad_service = get_vad_service(settings)
+        self.stream_vad_service = get_stream_vad_service(settings)
         self.issue_resolution_service = get_issue_resolution_service()
         self._sessions: dict[int, MediaStreamSession] = {}
 
@@ -827,13 +829,7 @@ class TwilioMediaStreamService:
         return max(20, int((len(mulaw_audio) / 8000) * 1000))
 
     def _is_speech_frame(self, mulaw_audio: bytes, during_playback: bool = False) -> bool:
-        linear_pcm = audioop.ulaw2lin(mulaw_audio, 2)
-        rms = audioop.rms(linear_pcm, 2)
-        threshold = self.settings.stream_vad_rms_threshold
-        if during_playback:
-            # During playback, slightly lower threshold so real user interruption is picked up faster.
-            threshold = max(240, int(threshold * 0.85))
-        return rms >= threshold
+        return self.stream_vad_service.is_speech_frame(mulaw_audio, during_playback=during_playback)
 
     def _should_cancel_playback(self, session: MediaStreamSession) -> bool:
         if session.assistant_playback_started_at is None:

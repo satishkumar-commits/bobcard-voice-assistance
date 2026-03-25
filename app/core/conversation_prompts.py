@@ -232,7 +232,7 @@ def build_opening_greeting(
     assistant_name = _normalize_name(agent_name) or "Maya"
     if language == "hi-IN":
         return (
-            f"{_build_hindi_salutation(clean_name)} मैं {assistant_name} हूँ, Bank of Baroda की तरफ से एक AI voice assistant बोल रही हूँ। "
+            f"{_build_hindi_salutation(clean_name)} मैं {assistant_name} हूँ, BOBCards की तरफ से एक AI voice assistant बोल रही हूँ। "
             "यह कॉल quality aur training के लिए record हो रही है। "
             "मैं आपकी BOBCards credit card application के बारे में call कर रही हूँ जो बीच में रुक गई थी। "
             "क्या अभी दो मिनट बात करना ठीक रहेगा?"
