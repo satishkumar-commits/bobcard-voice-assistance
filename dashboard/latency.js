@@ -14,6 +14,11 @@ const elements = {
   callDurationMetric: document.getElementById("callDurationMetric"),
   geminiOutputMetric: document.getElementById("geminiOutputMetric"),
   savedLogMetric: document.getElementById("savedLogMetric"),
+  bargeInMetric: document.getElementById("bargeInMetric"),
+  bargeInBlockMetric: document.getElementById("bargeInBlockMetric"),
+  sloAlertMetric: document.getElementById("sloAlertMetric"),
+  lastSloAlertMetric: document.getElementById("lastSloAlertMetric"),
+  rolloutRollbackMetric: document.getElementById("rolloutRollbackMetric"),
   autoScrollToggle: document.getElementById("autoScrollToggle"),
 };
 
@@ -27,6 +32,28 @@ let activeCallStartedAt = "";
 let activeCallEndedAt = "";
 let latestTimerSeconds = null;
 let persistedLogRequestToken = 0;
+let bargeInStats = createBargeInStats();
+let sloStats = createSloStats();
+
+function createBargeInStats() {
+  return {
+    confirmed: 0,
+    early: 0,
+    veryEarly: 0,
+    lowSpeech: 0,
+    blocked: 0,
+    blockedReasons: {},
+  };
+}
+
+function createSloStats() {
+  return {
+    total: 0,
+    warning: 0,
+    critical: 0,
+    last: "",
+  };
+}
 
 function setWsState(state) {
   if (!elements.wsState) {
@@ -107,6 +134,16 @@ function connectRealtime() {
       addLatencyEvent(event);
       return;
     }
+
+    if (event.type === "slo_alert") {
+      handleSloAlertEvent(event);
+      return;
+    }
+
+    if (event.type === "rollout_rollback") {
+      handleRolloutRollbackEvent(event);
+      return;
+    }
   };
 }
 
@@ -130,6 +167,13 @@ function subscribeToCall(callSid) {
   setMetric(elements.callDurationMetric, "-");
   setMetric(elements.geminiOutputMetric, "-");
   setMetric(elements.savedLogMetric, normalized ? "loading..." : "live only");
+  bargeInStats = createBargeInStats();
+  sloStats = createSloStats();
+  setMetric(elements.bargeInMetric, "-");
+  setMetric(elements.bargeInBlockMetric, "-");
+  setMetric(elements.sloAlertMetric, "-");
+  setMetric(elements.lastSloAlertMetric, "-");
+  setMetric(elements.rolloutRollbackMetric, "-");
   setActiveCall(normalized);
   void loadPersistedLatencyLogs(normalized);
 }
@@ -261,12 +305,76 @@ function updateMetrics(event) {
   if (event.step === "sarvam_tts_cache") {
     setMetric(elements.ttsMetric, "cache hit");
   }
+  updateBargeInTelemetry(event);
 }
 
 function setMetric(element, value) {
   if (element) {
     element.textContent = value;
   }
+}
+
+function updateBargeInTelemetry(event) {
+  if (event.step === "barge_in_confirmed") {
+    bargeInStats.confirmed += 1;
+    const playbackMs = Number(event.playback_ms || 0);
+    const speechMs = Number(event.speech_ms || 0);
+    if (playbackMs > 0 && playbackMs < 1000) {
+      bargeInStats.early += 1;
+    }
+    if (playbackMs > 0 && playbackMs < 500) {
+      bargeInStats.veryEarly += 1;
+    }
+    if (speechMs > 0 && speechMs <= 260) {
+      bargeInStats.lowSpeech += 1;
+    }
+    setMetric(
+      elements.bargeInMetric,
+      `${bargeInStats.confirmed} | <1s ${bargeInStats.early} | <500ms ${bargeInStats.veryEarly} | <=260ms ${bargeInStats.lowSpeech}`,
+    );
+    return;
+  }
+
+  if (event.step === "barge_in_gate_blocked") {
+    bargeInStats.blocked += 1;
+    const reason = String(event.reason || "unknown");
+    bargeInStats.blockedReasons[reason] = (bargeInStats.blockedReasons[reason] || 0) + 1;
+    const topReasons = Object.entries(bargeInStats.blockedReasons)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 2)
+      .map(([key, count]) => `${key}:${count}`)
+      .join(" | ");
+    setMetric(elements.bargeInBlockMetric, `${bargeInStats.blocked}${topReasons ? ` | ${topReasons}` : ""}`);
+  }
+}
+
+function handleSloAlertEvent(event) {
+  if (activeCallSid && event.call_sid && event.call_sid !== activeCallSid) {
+    return;
+  }
+  sloStats.total += 1;
+  const severity = String(event.severity || "warning");
+  if (severity === "critical") {
+    sloStats.critical += 1;
+  } else {
+    sloStats.warning += 1;
+  }
+  const metric = String(event.metric || "unknown");
+  const breachType = String(event.breach_type || "single");
+  const observed = Number(event.observed_ms || 0);
+  const threshold = Number(event.threshold_ms || 0);
+  const sampleCount = Number(event.sample_count || 0);
+  sloStats.last = `${metric} ${breachType} ${observed}ms>${threshold}ms n=${sampleCount}`;
+  setMetric(elements.sloAlertMetric, `${sloStats.total} | warn ${sloStats.warning} | crit ${sloStats.critical}`);
+  setMetric(elements.lastSloAlertMetric, sloStats.last);
+}
+
+function handleRolloutRollbackEvent(event) {
+  if (activeCallSid && event.call_sid && event.call_sid !== activeCallSid) {
+    return;
+  }
+  const until = event.rollback_until ? formatTime(event.rollback_until) : "-";
+  setMetric(elements.rolloutRollbackMetric, `ACTIVE until ${until}`);
 }
 
 function renderLatencyTable() {

@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,6 +17,7 @@ class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_phone_number: str = ""
+    twilio_validate_webhook_signature: bool = True
 
     # Sarvam speech-to-text and text-to-speech provider settings.
     sarvam_api_key: str = ""
@@ -31,10 +33,10 @@ class Settings(BaseSettings):
     sarvam_tts_model: str = "bulbul:v3"
     sarvam_tts_voice: str = "simran"
     sarvam_tts_pace: float = 1.0
-    sarvam_tts_sample_rate: int = 22050
+    sarvam_tts_sample_rate: int = 8000
     sarvam_tts_enable_preprocessing: bool = True
     sarvam_tts_use_streaming: bool = True
-    sarvam_tts_output_audio_codec: str = "linear16"
+    sarvam_tts_output_audio_codec: str = "mulaw"
     sarvam_tts_output_audio_bitrate: str = "128k"
     sarvam_tts_streaming_min_buffer_size: int = 40
     sarvam_tts_streaming_max_chunk_length: int = 120
@@ -43,6 +45,11 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash-lite"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+
+    # Feature flags for phased latency refactor rollout.
+    llm_streaming: bool = True
+    tts_persistent_ws: bool = True
+    tts_native_mulaw: bool = True
 
     # Storage, routing, and runtime tuning.
     database_url: str = Field(default="sqlite:///./data/voice_agent.db", alias="DATABASE_URL")
@@ -76,11 +83,32 @@ class Settings(BaseSettings):
     stream_stt_persistent_finalize_timeout_seconds: float = 1.2
     stream_stt_persistent_finalize_max_messages: int = 3
     stream_stt_turn_timeout_seconds: float = 10.0
-    stream_barge_in_grace_ms: int = 220
-    stream_barge_in_min_playback_ms: int = 420
-    stream_barge_in_min_speech_ms: int = 160
+    stt_mode: Literal["auto", "rest", "streaming"] = "auto"
+    stt_stream_retry_max: int = 2
+    stt_stream_backoff_ms: int = 300
+    stt_stream_cb_fails: int = 3
+    empty_transcript_min_chars: int = 3
+    barge_in_min_speech_ms: int = 260
+    barge_in_cooldown_ms: int = 220
+    stream_barge_in_grace_ms: int = 600
+    stream_barge_in_min_playback_ms: int = 1000
+    stream_barge_in_min_speech_ms: int = 450
     stream_utterance_queue_maxsize: int = 2
     tts_cache_max_entries: int = 96
+    slo_alerts_enabled: bool = True
+    slo_alert_cooldown_seconds: int = 30
+    slo_window_size: int = 40
+    slo_stt_latency_ms: int = 3500
+    slo_gemini_latency_ms: int = 4500
+    slo_tts_latency_ms: int = 3000
+    rollout_enabled: bool = False
+    rollout_llm_streaming_percent: int = 100
+    rollout_tts_persistent_ws_percent: int = 100
+    rollout_tts_native_mulaw_percent: int = 100
+    rollout_auto_rollback_enabled: bool = True
+    rollout_rollback_critical_alerts_threshold: int = 5
+    rollout_rollback_alert_window_seconds: int = 300
+    rollout_rollback_duration_seconds: int = 900
 
     model_config = SettingsConfigDict(
         env_file=".env",

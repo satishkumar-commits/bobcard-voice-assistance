@@ -279,11 +279,7 @@ def build_consent_reprompt(language: str, name: str = "") -> str:
     clean_name = _normalize_name(name)
     if language == "hi-IN":
         salutation = _build_hindi_salutation(clean_name)
-        return (
-            f"{salutation} अगर अभी busy हैं तो आप तीन options में से चुन सकते हैं: "
-            "callback, SMS link, या do-not-call. "
-            "कृपया हाँ, callback, link, या मना कहिए।"
-        )
+        return f"{salutation} अगर बात कर सकते हैं तो हाँ कहिए। नहीं तो कॉलबैक, लिंक, या मना कहिए।"
     prefix = f"{clean_name}, " if clean_name else ""
     return (
         f"{prefix}if now is not a good time, you can choose callback, SMS link, or do-not-call. "
@@ -436,6 +432,12 @@ def build_opt_out_reply(language: str = "en-IN") -> str:
     return "Understood. We will end this automated call now. Thank you."
 
 
+def build_application_not_started_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "समझ गई। अगर आपने BOB Card आवेदन शुरू नहीं किया है, तो मैं यह कॉल यहीं समाप्त करती हूँ। धन्यवाद।"
+    return "Understood. If you have not started a BOB Card application, I will close this call now. Thank you."
+
+
 def build_callback_ack(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
         return "धन्यवाद। मैं बाद में कॉल करने का अनुरोध नोट कर रही हूँ। नमस्ते।"
@@ -462,13 +464,13 @@ def build_goodbye_reply(language: str = "en-IN") -> str:
 
 def build_resolution_completed_reply(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
-        return "बहुत अच्छा, आपकी दिक्कत resolve हो गई। आगे कभी मदद चाहिए तो BOB Card support से फिर बात कर सकते हैं।"
+        return "बहुत अच्छा, आपकी समस्या का समाधान हो गया है। आगे कभी मदद चाहिए तो BOB Card support से फिर बात कर सकते हैं।"
     return "Glad that your issue is resolved. If you need any more help, you can reach BOB Card support again."
 
 
 def build_resolution_follow_up_prompt(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
-        return "ठीक है, यह issue resolve हो गया। क्या आपको किसी और चीज़ में मदद चाहिए?"
+        return "धन्यवाद, आपकी समस्या का समाधान हो गया है। क्या आपको किसी और चीज़ में मदद चाहिए?"
     return "Glad this issue is resolved. Do you need help with anything else?"
 
 
@@ -612,6 +614,23 @@ def detect_auth_denial(text: str) -> bool:
     if not normalized:
         return False
     return any(marker in normalized for marker in AUTH_DENY_KEYWORDS)
+
+
+def is_short_valid_intent(text: str) -> bool:
+    normalized = _normalize_choice_text(text)
+    if not normalized:
+        return False
+
+    if len(normalized.split()) > 5:
+        return False
+
+    if detect_consent_choice(text) != "unknown":
+        return True
+    if detect_auth_confirmation(text) or detect_auth_denial(text):
+        return True
+    if detect_resolution_choice(text) != "unknown":
+        return True
+    return False
 
 
 def build_opted_out_notice(language: str = "en-IN") -> str:

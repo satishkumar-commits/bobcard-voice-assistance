@@ -2,7 +2,7 @@ import base64
 import logging
 from time import perf_counter
 from xml.etree.ElementTree import Element, SubElement, tostring
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from twilio.rest import Client
@@ -21,6 +21,12 @@ class TwilioService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
+    @staticmethod
+    def _validate_public_url(base_url: str) -> None:
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("PUBLIC_URL must be a valid absolute URL like https://example.com.")
+
     def place_outbound_call(
         self,
         *,
@@ -32,6 +38,7 @@ class TwilioService:
         resolved_public_url = (public_url or self.settings.public_url).strip().rstrip("/")
         if not resolved_public_url:
             raise ValueError("PUBLIC_URL is required to place outbound Twilio calls.")
+        self._validate_public_url(resolved_public_url)
         if not self.settings.twilio_account_sid or not self.settings.twilio_auth_token:
             raise ValueError("Twilio credentials are not configured.")
         if not self.settings.twilio_phone_number:

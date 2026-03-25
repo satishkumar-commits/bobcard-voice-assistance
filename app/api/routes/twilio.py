@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Res
 from pydantic import BaseModel, Field
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from sqlalchemy.ext.asyncio import AsyncSession
+from twilio.request_validator import RequestValidator
 
 from app.core.config import get_settings
 from app.core.conversation_prompts import CALL_BOOTSTRAP
@@ -76,9 +77,72 @@ def resolve_public_url(request: Request, configured_public_url: str) -> str:
     return str(request.base_url).strip().rstrip("/")
 
 
+def _twilio_signature_candidate_urls(request: Request) -> list[str]:
+    path = request.url.path
+    query = request.url.query
+
+    candidates: list[str] = []
+    settings = get_settings()
+
+    def _add_url(url: str) -> None:
+        if url and url not in candidates:
+            candidates.append(url)
+
+    def _add_base_with_variants(base_url: str) -> None:
+        base = (base_url or "").strip().rstrip("/")
+        if not base:
+            return
+        with_query = f"{base}{path}"
+        without_query = with_query
+        if query:
+            with_query = f"{with_query}?{query}"
+        _add_url(with_query)
+        _add_url(without_query)
+
+    # Preferred: externally reachable URL configured for Twilio.
+    _add_base_with_variants(settings.public_url)
+
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    if forwarded_proto and forwarded_host:
+        _add_base_with_variants(f"{forwarded_proto}://{forwarded_host}")
+
+    direct_url = str(request.url)
+    _add_url(direct_url)
+    if query and "?" in direct_url:
+        _add_url(direct_url.split("?", 1)[0])
+    return candidates
+
+
+async def validate_twilio_signature(request: Request) -> None:
+    settings = get_settings()
+    if not settings.twilio_validate_webhook_signature:
+        return
+
+    if not settings.twilio_auth_token:
+        logger.error("Twilio signature validation is enabled but TWILIO_AUTH_TOKEN is not configured.")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Twilio validation misconfigured.")
+    signature = request.headers.get("x-twilio-signature", "").strip()
+    if not signature:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Missing Twilio signature.")
+
+    form = await request.form()
+    params: dict[str, str] = {}
+    for key, value in form.multi_items():
+        params[str(key)] = "" if value is None else str(value)
+
+    validator = RequestValidator(settings.twilio_auth_token)
+    for url in _twilio_signature_candidate_urls(request):
+        if validator.validate(url, params, signature):
+            return
+
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid Twilio signature.")
+
+
 @router.post("/voice")
 async def incoming_voice_call(
     request: Request,
+    _: None = Depends(validate_twilio_signature),
     CallSid: str = Form(...),
     From: str | None = Form(default=None),
     To: str | None = Form(default=None),
@@ -148,6 +212,7 @@ async def incoming_voice_call(
 @router.post("/recording")
 async def recording_callback(
     request: Request,
+    _: None = Depends(validate_twilio_signature),
     CallSid: str = Form(...),
     From: str | None = Form(default=None),
     To: str | None = Form(default=None),
@@ -209,6 +274,7 @@ async def recording_callback(
 
 @router.post("/status", status_code=status.HTTP_204_NO_CONTENT)
 async def call_status_callback(
+    _: None = Depends(validate_twilio_signature),
     CallSid: str = Form(...),
     CallStatus: str = Form(...),
     session: AsyncSession = Depends(get_db),
