@@ -487,7 +487,8 @@ class SarvamTTSService:
     def _effective_pace(self, language_code: str) -> float:
         base_pace = float(self.settings.sarvam_tts_pace)
         if language_code == "hi-IN":
-            return max(0.96, min(base_pace, 1.05))
+            # Keep Hindi voice slightly faster than neutral to improve call flow clarity.
+            return min(max(base_pace, 1.02), 1.12)
         return base_pace
 
     def _effective_sample_rate(self, output_audio_codec: str) -> int:
@@ -518,9 +519,15 @@ class SarvamTTSService:
             return normalized
 
         replacements = {
+            "ओ टी पी": "ओटीपी",
+            "ओ.टी.पी": "ओटीपी",
+            "O T P": "ओटीपी",
             "OTP": "ओटीपी",
+            "एस एम एस": "एसएमएस",
+            "S M S": "एसएमएस",
             "EMI": "ईएमआई",
             "SMS": "एसएमएस",
+            "यू पी आई": "यूपीआई",
             "app": "ऐप",
             "App": "ऐप",
             "step by step": "एक एक कदम में",

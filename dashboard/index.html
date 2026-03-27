@@ -13,6 +13,10 @@
           <span class="live-dot"></span>
           <span id="wsState" class="topbar-text">disconnected</span>
         </div>
+        <div class="topbar-center">
+          <p class="topbar-kicker">Realtime Voice Operations</p>
+          <h1>BOBCards Dashboard</h1>
+        </div>
         <a class="link-button" href="/dashboard/latency.html">Latency Monitor</a>
       </header>
 
@@ -25,20 +29,12 @@
 
           <label class="field">
             <span>Customer Name</span>
-            <input id="customerNameInput" type="text" placeholder="e.g. Rahul Sharma" />
+            <input id="customerNameInput" type="text" placeholder="e.g. Satish Chaubey" />
           </label>
 
           <label class="field">
             <span>Mobile Number</span>
-            <input id="mobileNumberInput" type="tel" placeholder="+919876543210" />
-          </label>
-
-          <label class="field">
-            <span>Language</span>
-            <select id="languageSelect">
-              <option value="hi-IN">Hindi (hi-IN)</option>
-              <option value="en-IN">English (en-IN)</option>
-            </select>
+            <input id="mobileNumberInput" type="tel" placeholder="+918299805407" />
           </label>
 
           <label class="field">
@@ -92,6 +88,36 @@
             Waiting for a call to start.
           </div>
 
+          <section class="latency-overview" id="latencyOverview">
+            <article class="latency-card">
+              <div class="latency-title">STT</div>
+              <div class="latency-values">
+                <strong id="sttLatestMetric">-</strong>
+                <span id="sttAvgMetric">Avg -</span>
+              </div>
+            </article>
+            <article class="latency-card">
+              <div class="latency-title">Gemini</div>
+              <div class="latency-values">
+                <strong id="geminiLatestMetric">-</strong>
+                <span id="geminiAvgMetric">Avg -</span>
+              </div>
+            </article>
+            <article class="latency-card">
+              <div class="latency-title">TTS</div>
+              <div class="latency-values">
+                <strong id="ttsLatestMetric">-</strong>
+                <span id="ttsAvgMetric">Avg -</span>
+              </div>
+            </article>
+          </section>
+
+          <section class="pipeline-strip" id="pipelineStrip">
+            <span class="pipeline-pill" id="sttPipelineState">STT idle</span>
+            <span class="pipeline-pill" id="geminiPipelineState">Gemini idle</span>
+            <span class="pipeline-pill" id="ttsPipelineState">TTS idle</span>
+          </section>
+
           <div class="journey-strip" id="journeyStrip">
             <div class="journey-step" data-stage="requesting">
               <span class="journey-dot"></span>
@@ -119,13 +145,17 @@
             </div>
           </div>
 
-          <div id="transcriptEmptyState" class="transcript-empty">
-            <div class="empty-mark">Call</div>
-            <p>Enter a customer name and mobile number on the left, then start a call.</p>
-            <small>The live AI and customer conversation will appear here automatically.</small>
+          <div class="chat-shell">
+            <div id="transcriptEmptyState" class="transcript-empty">
+              <div class="empty-mark">Call</div>
+              <p>Enter a customer name and mobile number on the left, then start a call.</p>
+              <small>The live AI and customer conversation will appear here automatically.</small>
+            </div>
+            <div id="transcriptLog" class="transcript-board"></div>
+            <div class="chat-composer">
+              <span class="composer-hint">Live voice conversation. Messages appear automatically from call audio.</span>
+            </div>
           </div>
-
-          <div id="transcriptLog" class="transcript-board"></div>
         </section>
 
         <aside class="right-panel">

@@ -611,11 +611,12 @@ class SarvamSTTService:
         content_type: str = "audio/wav",
         language_code: str = "unknown",
         call_sid: str = "",
+        force_rest: bool = False,
     ) -> STTResult:
         sample_rate = self._extract_sample_rate(audio_bytes, content_type)
         streaming_enabled = self._is_streaming_enabled_by_mode()
         streaming_allowed = self._can_use_streaming(call_sid)
-        if self._streaming_client and content_type == "audio/wav" and streaming_enabled and streaming_allowed:
+        if not force_rest and self._streaming_client and content_type == "audio/wav" and streaming_enabled and streaming_allowed:
             configured_attempts = max(1, int(self.settings.stt_stream_retry_max))
             max_attempts = configured_attempts
             backoff_seconds = max(0, int(self.settings.stt_stream_backoff_ms)) / 1000
@@ -673,7 +674,7 @@ class SarvamSTTService:
                     "retryable": (last_policy or {}).get("retryable", True),
                 }
             )
-        elif self._streaming_client and content_type == "audio/wav" and streaming_enabled and not streaming_allowed:
+        elif not force_rest and self._streaming_client and content_type == "audio/wav" and streaming_enabled and not streaming_allowed:
             emit_latency_event(
                 {
                     "step": "sarvam_stt_streaming_skipped",

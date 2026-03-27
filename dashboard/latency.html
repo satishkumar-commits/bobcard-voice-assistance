@@ -7,110 +7,83 @@
     <link rel="stylesheet" href="/dashboard/latency.css" />
   </head>
   <body>
-    <main class="latency-shell">
-      <header class="hero">
-        <div>
-          <p class="eyebrow">Realtime Monitor</p>
-          <h1>Latency Timeline</h1>
-          <p class="hero-copy">Watch Twilio, STT, Gemini, and TTS timings arrive live for each call.</p>
-        </div>
-        <div class="hero-actions">
-          <a class="ghost-link" href="/dashboard/">Conversation Console</a>
-          <span id="wsState" class="status-chip disconnected">disconnected</span>
-        </div>
-      </header>
-      <section class="metrics-grid">
-        <article class="metric-card">
-          <span>Active Call</span>
-          <strong id="activeCallValue">All calls</strong>
-        </article>
-        <article class="metric-card">
-          <span>Last STT</span>
-          <strong id="sttMetric">-</strong>
-        </article>
-        <article class="metric-card">
-          <span>Last Gemini</span>
-          <strong id="geminiMetric">-</strong>
-        </article>
-        <article class="metric-card">
-          <span>Last TTS</span>
-          <strong id="ttsMetric">-</strong>
-        </article>
-        <article class="metric-card">
-          <span>Total Call Duration</span>
-          <strong id="callDurationMetric">-</strong>
-        </article>
-        <article class="metric-card">
-          <span>Gemini Output</span>
-          <strong id="geminiOutputMetric">-</strong>
-        </article>
-        <article class="metric-card">
-          <span>Saved Logs</span>
-          <strong id="savedLogMetric">-</strong>
-        </article>
-        <article class="metric-card">
-          <span>Barge-in Confirmed</span>
-          <strong id="bargeInMetric">-</strong>
-        </article>
-        <article class="metric-card">
-          <span>Barge-in Blocks</span>
-          <strong id="bargeInBlockMetric">-</strong>
-        </article>
-        <article class="metric-card">
-          <span>SLO Alerts</span>
-          <strong id="sloAlertMetric">-</strong>
-        </article>
-        <article class="metric-card">
-          <span>Last SLO Alert</span>
-          <strong id="lastSloAlertMetric">-</strong>
-        </article>
-        <article class="metric-card">
-          <span>Rollout Rollback</span>
-          <strong id="rolloutRollbackMetric">-</strong>
-        </article>
-      </section>
+    <div class="monitor-shell">
+      <aside class="app-rail">
+        <div class="brand">Latency Ops</div>
+        <span id="wsState" class="status-chip disconnected">disconnected</span>
+        <nav class="rail-nav">
+          <a class="rail-item active" href="#">Call Logs</a>
+          <a class="rail-item console-link" href="/dashboard/">Conversation Console</a>
+        </nav>
+      </aside>
 
-      <section class="panel-grid">
-        <aside class="side-panel">
-          <div class="panel-head">
-            <h2>Recent Calls</h2>
-          </div>
-          <div id="recentCalls" class="recent-calls empty">Loading recent calls...</div>
-        </aside>
-
-        <section class="log-panel">
-          <div class="panel-head log-head">
-            <div>
-              <h2>Live Latency Events</h2>
-              <p id="feedSubtitle" class="panel-copy">Streaming all calls.</p>
+      <main class="workspace">
+        <section class="workspace-grid">
+          <section class="calls-pane panel">
+            <div class="panel-head">
+              <h2>Call Logs</h2>
+              <button id="refreshCallsButton" class="mini-btn" type="button">Refresh</button>
             </div>
-            <label class="toggle">
-              <input id="autoScrollToggle" type="checkbox" checked />
-              <span>Auto scroll</span>
-            </label>
-          </div>
+            <div class="filter-row">
+              <input id="callSidFilter" type="text" placeholder="Filter by Call SID..." />
+              <button id="watchCallButton" class="mini-btn primary" type="button">Watch</button>
+              <button id="clearFilterButton" class="mini-btn" type="button">All</button>
+            </div>
+            <div id="recentCalls" class="recent-calls empty">Loading recent calls...</div>
+          </section>
 
-          <div class="table-wrap">
-            <table class="latency-table">
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Step</th>
-                  <th>Call</th>
-                  <th>Latency</th>
-                  <th>Details</th>
-                </tr>
-              </thead>
-              <tbody id="latencyTableBody">
-                <tr class="empty-row">
-                  <td colspan="5">Waiting for realtime latency events...</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+          <section class="stream-pane panel">
+            <div class="panel-head stream-head">
+              <div>
+                <h2>Live Latency Events</h2>
+                <p id="feedSubtitle" class="panel-copy">Streaming all calls.</p>
+              </div>
+              <label class="toggle">
+                <input id="autoScrollToggle" type="checkbox" checked />
+                <span>Auto scroll</span>
+              </label>
+            </div>
+            <div class="wave-strip" aria-hidden="true"></div>
+            <div class="table-wrap">
+              <table class="latency-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Step</th>
+                    <th>Call</th>
+                    <th>Latency</th>
+                    <th>Details</th>
+                  </tr>
+                </thead>
+                <tbody id="latencyTableBody">
+                  <tr class="empty-row">
+                    <td colspan="5">Waiting for realtime latency events...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <aside class="details-pane panel">
+            <h2>Call Details</h2>
+            <div class="detail-list">
+              <div class="detail-item"><span>Active Call</span><strong id="activeCallValue">All calls</strong></div>
+              <div class="detail-item"><span>Last STT</span><strong id="sttMetric">-</strong></div>
+              <div class="detail-item"><span>Last Gemini</span><strong id="geminiMetric">-</strong></div>
+              <div class="detail-item"><span>Last TTS</span><strong id="ttsMetric">-</strong></div>
+              <div class="detail-item"><span>Duration</span><strong id="callDurationMetric">-</strong></div>
+              <div class="detail-item"><span>Gemini Output</span><strong id="geminiOutputMetric">-</strong></div>
+              <div class="detail-item"><span>Saved Logs</span><strong id="savedLogMetric">-</strong></div>
+              <div class="detail-item"><span>Barge-in Confirmed</span><strong id="bargeInMetric">-</strong></div>
+              <div class="detail-item"><span>Barge-in Blocks</span><strong id="bargeInBlockMetric">-</strong></div>
+              <div class="detail-item"><span>SLO Alerts</span><strong id="sloAlertMetric">-</strong></div>
+              <div class="detail-item"><span>Last SLO Alert</span><strong id="lastSloAlertMetric">-</strong></div>
+              <div class="detail-item"><span>Rollback</span><strong id="rolloutRollbackMetric">-</strong></div>
+            </div>
+          </aside>
         </section>
-      </section>
-    </main>
+      </main>
+    </div>
 
     <script type="module" src="/dashboard/latency.js"></script>
   </body>

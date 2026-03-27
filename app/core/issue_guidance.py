@@ -116,6 +116,29 @@ _GENERAL_BANKING_QUESTION_KEYWORDS = (
     "क्या सोल्यूशन",
     "क्या प्रोवाइड",
     "कौन सी सुविधा",
+    "platinum card",
+    "platinum",
+    "card details",
+    "card information",
+    "card benefits",
+    "card feature",
+    "प्लेटिनम कार्ड",
+    "कार्ड के बारे में",
+    "कार्ड की जानकारी",
+    "कार्ड डिटेल",
+    "कार्ड लाभ",
+    "कार्ड फीचर",
+    "खासियत",
+    "खासियतें",
+    "features",
+    "benefits",
+    "card ki jankari",
+    "card ki jankari chahiye",
+    "card ke fayde",
+    "कार्ड की खासियत",
+    "कार्ड की खासियतें",
+    "कार्ड की जानकारी",
+    "कार्ड के फायदे",
 )
 
 _ROMANIZED_HINDI_HINTS = {
@@ -147,24 +170,12 @@ def build_process_resume_context_reply(
     language = normalize_language(language)
     if language == "hi-IN":
         if pending_step:
-            return (
-                f"आपकी BOBCards credit card application में '{pending_step}' step pending है। "
-                "मैं उसी step को पूरा कराने में मदद कर रही हूँ।"
-            )
-        return (
-            "आपकी BOBCards credit card application बीच में रुक गई थी। "
-            "मैं pending step पूरा कराने में मदद के लिए कॉल कर रही हूँ।"
-        )
+            return f"ठीक है। अभी हम '{pending_step}' चरण पूरा करते हैं।"
+        return "ठीक है। अब हम आपकी लंबित प्रक्रिया पूरी करते हैं।"
 
     if pending_step:
-        return (
-            f"Your BOBCards credit card application is pending at '{pending_step}'. "
-            "I am calling to help you complete this step."
-        )
-    return (
-        "Your BOBCards credit card application was left incomplete. "
-        "I am calling to help you complete the pending step."
-    )
+        return f"Okay. Let us complete the '{pending_step}' step now."
+    return "Okay. Let us complete your pending process now."
 
 
 def normalize_issue_text(text: str) -> str:
@@ -293,40 +304,40 @@ def build_issue_help_reply(issue_type: IssueType, language: str = "en-IN") -> st
 
     if language == "hi-IN":
         replies = {
-            "pan_upload": "कोई बात नहीं, PAN step में दिक्कत common है। PAN की clear photo लेकर फिर से upload कीजिए।",
-            "aadhaar_upload": "ठीक है, मैं साथ हूँ। Aadhaar की साफ़ और सीधी photo चुनकर दोबारा upload कीजिए।",
-            "photo_upload": "समझ गई। अच्छी रोशनी में clear selfie लेकर फिर से upload कीजिए।",
-            "application_error_issue": "ठीक है। app एक बार बंद करके फिर खोलिए और वही step फिर से continue कीजिए।",
-            "statement_issue": "कोई समस्या नहीं। statement section खोलकर refresh कीजिए, अगर नहीं दिखे तो मैं next step बताती हूँ।",
-            "invoice_issue": "ठीक है, invoice वाले section को refresh करके फिर check कीजिए।",
-            "refund_issue": "समझ गई। refund reference से status दोबारा check कीजिए, मैं साथ हूँ।",
-            "card_block_issue": "ठीक है, card controls में जाकर block या unblock option फिर से check कीजिए।",
-            "address_update_issue": "कोई बात नहीं। address update flow खोलकर OTP verify कीजिए और request फिर submit कीजिए।",
-            "emi_issue": "ठीक है। EMI option eligible transaction पर available होता है, अभी वही section check कीजिए।",
-            "otp_issue": "समझ गई। inbox और network check करके resend OTP एक बार दबाइए। OTP किसी से share मत कीजिए।",
-            "login_issue": "ठीक है, login में दिक्कत है। registered mobile और password या OTP details फिर से check कीजिए।",
-            "application_status_issue": "कोई बात नहीं। tracking page refresh करके application status फिर check कीजिए।",
-            "document_upload": "समझ गई। document की clear copy चुनकर दोबारा upload कीजिए।",
-            "generic_process_help": "ठीक है। बस बताइए आप किस step पर अटके हैं, मैं वहीं से guide करूँगी।",
+            "pan_upload": "समझ गई। PAN की साफ़ फोटो लेकर फिर से अपलोड कीजिए।",
+            "aadhaar_upload": "ठीक है। Aadhaar की साफ़ और सीधी फोटो फिर से अपलोड कीजिए।",
+            "photo_upload": "ठीक है। अच्छी रोशनी में साफ़ सेल्फी लेकर दोबारा अपलोड कीजिए।",
+            "application_error_issue": "समझ गई। ऐप बंद करके फिर खोलिए, फिर वही चरण दोबारा कीजिए।",
+            "statement_issue": "ठीक है। स्टेटमेंट सेक्शन रीफ्रेश करके फिर देखिए।",
+            "invoice_issue": "समझ गई। इनवॉइस सेक्शन रीफ्रेश करके फिर जाँचिए।",
+            "refund_issue": "ठीक है। रिफंड रेफरेंस से स्थिति फिर से जाँचिए।",
+            "card_block_issue": "समझ गई। कार्ड कंट्रोल में ब्लॉक या अनब्लॉक विकल्प फिर देखें।",
+            "address_update_issue": "ठीक है। पता अपडेट प्रक्रिया खोलकर OTP सत्यापित करें और अनुरोध भेजें।",
+            "emi_issue": "समझ गई। जिस लेन-देन पर EMI चाहिए, वही पेज फिर देखें।",
+            "otp_issue": "ठीक है। नेटवर्क और SMS इनबॉक्स जाँचकर OTP फिर से मंगाइए। OTP किसी से साझा न करें।",
+            "login_issue": "समझ गई। पंजीकृत मोबाइल और पासवर्ड या OTP फिर से जाँचिए।",
+            "application_status_issue": "ठीक है। ट्रैकिंग पेज रीफ्रेश करके स्थिति फिर देखिए।",
+            "document_upload": "समझ गई। दस्तावेज़ की साफ़ कॉपी चुनकर दोबारा अपलोड कीजिए।",
+            "generic_process_help": "ठीक है। आप किस चरण पर रुके हैं, बस वही बताइए।",
         }
         return replies[issue_type]
 
     replies = {
-        "pan_upload": "No worries, PAN step issues are common. Please upload a clear PAN image again.",
-        "aadhaar_upload": "I understand. Please upload a clear Aadhaar image again and we’ll continue.",
-        "photo_upload": "Got it. Please retake a clear selfie in good light and upload again.",
-        "application_error_issue": "Understood. Please reopen the app and continue the same step once again.",
-        "statement_issue": "No problem. Please refresh the statement section and check again.",
-        "invoice_issue": "Understood. Please refresh the invoice/documents section and check again.",
-        "refund_issue": "I see. Please recheck refund status using your reference details.",
-        "card_block_issue": "Sure. Please open card controls and check block or unblock options again.",
-        "address_update_issue": "No worries. Please reopen address update flow, verify OTP, and submit again.",
-        "emi_issue": "Understood. Please check EMI options on the eligible transaction again.",
-        "otp_issue": "Please check inbox and network, then tap resend OTP once. Do not share OTP with anyone.",
-        "login_issue": "Please verify registered mobile and password or OTP details, then sign in again.",
-        "application_status_issue": "Please refresh the tracking page and check your application status again.",
-        "document_upload": "Please choose a clear document image or PDF and upload again.",
-        "generic_process_help": "Understood. Tell me the exact step where you are stuck and I’ll guide you from there.",
+        "pan_upload": "Got it. Please upload a clear PAN image again.",
+        "aadhaar_upload": "Understood. Please upload a clear Aadhaar image again.",
+        "photo_upload": "Okay. Please retake a clear selfie in good light.",
+        "application_error_issue": "I understand. Please reopen the app and retry the same step.",
+        "statement_issue": "Sure. Please refresh the statement section and check again.",
+        "invoice_issue": "Understood. Please refresh the invoice section and check again.",
+        "refund_issue": "Got it. Please recheck refund status with your reference.",
+        "card_block_issue": "Okay. Please open card controls and check block or unblock options.",
+        "address_update_issue": "Understood. Reopen address update, verify OTP, and submit again.",
+        "emi_issue": "Sure. Please check EMI option on the eligible transaction again.",
+        "otp_issue": "Please check network and SMS inbox, then request OTP again. Do not share OTP.",
+        "login_issue": "Please verify registered mobile and password or OTP, then sign in again.",
+        "application_status_issue": "Please refresh the tracking page and check status again.",
+        "document_upload": "Please select a clear document image or PDF and upload again.",
+        "generic_process_help": "Understood. Tell me the exact step where you are stuck.",
     }
     return replies[issue_type]
 
@@ -338,9 +349,65 @@ def detect_issue_symptom(text: str) -> IssueSymptom | None:
 
     if _contains_any(normalized, ("error", "message", "err", "एरर", "मैसेज", "संदेश")):
         return "error_message"
-    if _contains_any(normalized, ("blur", "blurry", "clear nahi", "not clear", "धुंध", "साफ नहीं", "ब्लर")):
+    if _contains_any(
+        normalized,
+        (
+            "blur",
+            "blurry",
+            "clear nahi",
+            "not clear",
+            "धुंध",
+            "साफ नहीं",
+            "ब्लर",
+            "photo acchi nahi",
+            "photo achi nahi",
+            "फोटो अच्छी नहीं",
+            "फोटो अच्छी नही",
+            "saaf nahi lag rahi",
+            "साफ नहीं लग रही",
+        ),
+    ):
         return "blurred_image"
-    if _contains_any(normalized, ("wrong", "incorrect", "incorrect password", "password incorrect", "इनकरेक्ट", "correct nahi", "mismatch", "गलत", "मिलान नहीं", "करेक्ट नहीं")):
+    if _contains_any(
+        normalized,
+        (
+            "wrong",
+            "incorrect",
+            "incorrect password",
+            "password incorrect",
+            "इनकरेक्ट",
+            "correct nahi",
+            "mismatch",
+            "गलत",
+            "मिलान नहीं",
+            "करेक्ट नहीं",
+            "amount mismatch",
+            "amount different",
+            "amount less",
+            "amount more",
+            "राशि अलग",
+            "अलग राशि",
+            "कम राशि",
+            "ज़्यादा राशि",
+            "ज्यादा राशि",
+            "होना चाहिए था",
+            "should have been",
+        ),
+    ):
+        return "incorrect_details"
+    if any(ch.isdigit() for ch in normalized) and _contains_any(
+        normalized,
+        (
+            "shown",
+            "showing",
+            "dikha",
+            "dikh raha",
+            "dikh rha",
+            "दिख रहा",
+            "दिख रही",
+            "दिखा है",
+        ),
+    ):
         return "incorrect_details"
     if _contains_any(
         normalized,
@@ -380,51 +447,198 @@ def detect_issue_symptom(text: str) -> IssueSymptom | None:
         return "not_found"
     if _contains_any(normalized, ("not upload", "not uploading", "upload nahi", "download nahi", "submit nahi", "not submitting", "not downloading", "stuck", "retry", "अपलोड नहीं", "डाउनलोड नहीं", "submit नहीं", "अटक", "फंस", "नहीं हो रहा")):
         return "upload_blocked"
+    if _contains_any(
+        normalized,
+        (
+            "upload ruk",
+            "ruk raha",
+            "ruk gaya",
+            "not going",
+            "not able to upload",
+            "नहीं जा रहा",
+            "नहीं जा रही",
+            "रुक रहा",
+            "रुक रही",
+            "रुक गया",
+            "रुक गई",
+            "हो नहीं रहा",
+            "हो नहीं रही",
+            "नहीं हो पा",
+        ),
+    ):
+        return "upload_blocked"
     if _contains_any(normalized, ("pata nahi", "dont know", "don't know", "not sure", "पता नहीं", "मालूम नहीं")):
         return "unknown"
     return None
 
 
-def build_issue_follow_up_question(issue_type: IssueType, language: str = "en-IN") -> str:
+def build_issue_follow_up_question(
+    issue_type: IssueType,
+    language: str = "en-IN",
+    *,
+    follow_up_count: int = 0,
+) -> str:
     language = normalize_language(language)
+    stage_index = max(0, min(follow_up_count, 3)) - 1 if follow_up_count > 0 else 0
+
     if language == "hi-IN":
         prompts = {
-            "aadhaar_upload": "ठीक है, Aadhaar step में exactly क्या हो रहा है: photo blur है, upload रुक रहा है, या error दिख रहा है?",
-            "pan_upload": "समझ गई। PAN step में क्या issue है: photo clear नहीं, upload fail, या error message?",
-            "photo_upload": "ठीक है। selfie step में दिक्कत blur है या upload रुक रहा है?",
-            "application_error_issue": "ठीक है। app नहीं खुल रहा, crash हो रहा है, या कोई specific error दिख रहा है?",
-            "statement_issue": "ठीक है। statement दिख नहीं रहा, download नहीं हो रहा, या open नहीं हो रहा?",
-            "invoice_issue": "समझ गई। invoice missing है, download fail है, या error आ रहा है?",
-            "refund_issue": "ठीक है। refund credit नहीं दिख रहा, delay है, या amount mismatch लग रहा है?",
-            "card_block_issue": "ठीक है। block/unblock option नहीं मिल रहा, या error message दिख रहा है?",
-            "address_update_issue": "ठीक है। OTP नहीं आ रहा, document upload fail है, या submit नहीं हो रहा?",
-            "emi_issue": "ठीक है। EMI option नहीं दिख रहा, eligibility issue है, या submit fail हो रहा है?",
-            "otp_issue": "समझ गई। OTP बिल्कुल नहीं आया, late आया, या resend के बाद भी नहीं मिला?",
-            "login_issue": "ठीक है। login OTP step पर अटक रहा है, password issue है, या sign-in fail है?",
-            "application_status_issue": "ठीक है। status नहीं दिख रहा, page नहीं खुल रहा, या details match नहीं कर रही?",
-            "document_upload": "ठीक है। file upload नहीं हो रही, image unclear है, या error message आ रहा है?",
-            "generic_process_help": "ठीक है। बस step का नाम बोलिए जहाँ आप अटके हैं।",
+            "aadhaar_upload": (
+                "समझ गई। अभी Aadhaar अपलोड पेज पर कौन सा संदेश दिख रहा है?",
+                "ठीक है। अपलोड दबाने के बाद स्क्रीन पर क्या बदलता है?",
+                "क्या फोटो चुनने के बाद भी वही पेज रुका रहता है?",
+            ),
+            "pan_upload": (
+                "समझ गई। अभी PAN अपलोड पेज पर क्या लिखा दिख रहा है?",
+                "ठीक है। अपलोड बटन दबाने के बाद क्या होता है?",
+                "क्या PAN फोटो चुनने के बाद भी आगे नहीं बढ़ रहा?",
+            ),
+            "photo_upload": (
+                "समझ गई। सेल्फी लेने के बाद स्क्रीन पर क्या दिख रहा है?",
+                "ठीक है। क्या कैमरा खुल रहा है या वहीं रुक रहा है?",
+                "क्या सेल्फी कैप्चर के बाद फिर से रीटेक पर आ रहा है?",
+            ),
+            "application_error_issue": (
+                "समझ गई। अभी ऐप में ऊपर कौन सा एरर दिख रहा है?",
+                "ठीक है। यह एरर किस पेज पर आ रहा है?",
+                "क्या ऐप दोबारा खोलने पर भी वही एरर आता है?",
+            ),
+            "statement_issue": (
+                "समझ गई। स्टेटमेंट पेज पर अभी क्या दिख रहा है?",
+                "ठीक है। डाउनलोड दबाने पर कोई संदेश आता है क्या?",
+                "क्या फाइल खुलते समय पासवर्ड संदेश दिख रहा है?",
+            ),
+            "invoice_issue": (
+                "समझ गई। इनवॉइस सेक्शन में अभी क्या लिखा आ रहा है?",
+                "ठीक है। डाउनलोड दबाने पर कौन सा संदेश मिलता है?",
+                "क्या इनवॉइस लिस्ट खुल रही है या खाली दिख रही है?",
+            ),
+            "refund_issue": (
+                "समझ गई। रिफंड में अभी सबसे बड़ी दिक्कत क्या दिख रही है?",
+                "ठीक है। क्या ट्रांजैक्शन पर कोई स्टेटस लाइन दिख रही है?",
+                "क्या अपेक्षित राशि और दिख रही राशि अलग है?",
+            ),
+            "card_block_issue": (
+                "समझ गई। कार्ड कंट्रोल पेज पर अभी क्या दिख रहा है?",
+                "ठीक है। ब्लॉक या अनब्लॉक दबाने पर क्या संदेश आता है?",
+                "क्या वही कार्रवाई फिर करने पर भी एरर आ रहा है?",
+            ),
+            "address_update_issue": (
+                "समझ गई। पता अपडेट में अभी कौन सा चरण रुका है?",
+                "ठीक है। OTP चरण में क्या लिखा दिख रहा है?",
+                "क्या पता प्रमाण अपलोड के बाद भी सबमिट नहीं हो रहा?",
+            ),
+            "emi_issue": (
+                "समझ गई। EMI विकल्प खोलने पर क्या दिख रहा है?",
+                "ठीक है। क्या पात्रता संदेश आ रहा है या खाली है?",
+                "क्या EMI अनुरोध भेजते समय एरर दिख रहा है?",
+            ),
+            "otp_issue": (
+                "समझ गई। OTP स्क्रीन पर अभी क्या लिखा आ रहा है?",
+                "ठीक है। री-सेंड के बाद कोई नया संदेश आया क्या?",
+                "क्या SMS आता है लेकिन OTP बॉक्स में मान्य नहीं हो रहा?",
+            ),
+            "login_issue": (
+                "समझ गई। लॉगिन पेज पर कौन सा संदेश दिख रहा है?",
+                "ठीक है। क्या मोबाइल दर्ज करने के बाद OTP स्क्रीन खुल रही है?",
+                "क्या पासवर्ड डालने पर तुरंत एरर आता है?",
+            ),
+            "application_status_issue": (
+                "समझ गई। स्टेटस पेज पर अभी क्या दिख रहा है?",
+                "ठीक है। क्या ट्रैकिंग नंबर डालने के बाद पेज खुल रहा है?",
+                "क्या स्टेटस लाइन बदलती है या वही रहती है?",
+            ),
+            "document_upload": (
+                "समझ गई। दस्तावेज़ अपलोड पेज पर अभी क्या दिख रहा है?",
+                "ठीक है। फाइल चुनने के बाद कौन सा संदेश आता है?",
+                "क्या सबमिट दबाने पर भी अपलोड पूरा नहीं होता?",
+            ),
+            "generic_process_help": (
+                "समझ गई। आप अभी किस चरण पर रुके हैं?",
+                "ठीक है। उस चरण पर स्क्रीन में क्या लिखा आ रहा है?",
+                "क्या आप वही लाइन शब्दों में पढ़कर बता सकते हैं?",
+            ),
         }
-        return prompts[issue_type]
+        return prompts[issue_type][stage_index]
 
     prompts = {
-        "aadhaar_upload": "Understood. Is the Aadhaar issue a blurry image, a stuck upload, or an error message?",
-        "pan_upload": "Got it. Is the PAN issue an unclear image, upload failure, or an error message?",
-        "photo_upload": "Understood. Is the selfie issue blur, face not clear, or upload getting stuck?",
-        "application_error_issue": "I see. Is the app not opening, crashing, or showing a specific error?",
-        "statement_issue": "Understood. Is the statement missing, not downloading, or not opening?",
-        "invoice_issue": "Got it. Is the invoice missing, failing to download, or showing an error?",
-        "refund_issue": "Understood. Is the refund delayed, not credited, or amount not visible?",
-        "card_block_issue": "I see. Is block or unblock option missing, or is there an error message?",
-        "address_update_issue": "Understood. Is OTP missing, document upload failing, or request not submitting?",
-        "emi_issue": "Got it. Is EMI option missing, eligibility not showing, or request not submitting?",
-        "otp_issue": "Understood. Is OTP not received, delayed, or still missing after resend?",
-        "login_issue": "I see. Is login stuck at OTP, password issue, or sign-in failure?",
-        "application_status_issue": "Understood. Is status not visible, page not opening, or details mismatch?",
-        "document_upload": "Got it. Is the document not uploading, unclear, or showing an error?",
-        "generic_process_help": "Please tell me exactly which step you are stuck on.",
+        "aadhaar_upload": (
+            "Understood. What message is currently visible on the Aadhaar upload page?",
+            "Okay. What changes right after you tap upload?",
+            "Does it still stay on the same page after selecting the image?",
+        ),
+        "pan_upload": (
+            "Got it. What message is visible on the PAN upload page now?",
+            "Okay. What happens immediately after you tap upload?",
+            "Does it still not move ahead after selecting PAN image?",
+        ),
+        "photo_upload": (
+            "Understood. What do you see right after taking selfie?",
+            "Okay. Does camera open, or does it stay stuck?",
+            "After capture, does it return to retake again?",
+        ),
+        "application_error_issue": (
+            "I understand. Which error line is visible at the top of app screen?",
+            "Okay. On which exact page does this error appear?",
+            "After reopening app, does the same error still appear?",
+        ),
+        "statement_issue": (
+            "Understood. What is visible on statement page right now?",
+            "Okay. What message appears when you tap download?",
+            "Do you see a password-related message while opening file?",
+        ),
+        "invoice_issue": (
+            "Got it. What text is visible in invoice section now?",
+            "Okay. What message appears when you tap download?",
+            "Does invoice list open, or does it look empty?",
+        ),
+        "refund_issue": (
+            "Understood. What is the main refund issue visible now?",
+            "Okay. Do you see any status line on that transaction?",
+            "Are expected amount and shown amount different?",
+        ),
+        "card_block_issue": (
+            "Understood. What is visible now on card controls page?",
+            "Okay. What message appears after tapping block or unblock?",
+            "Does the same error come even after retry?",
+        ),
+        "address_update_issue": (
+            "Understood. Which exact step is stuck in address update?",
+            "Okay. What message do you see at OTP step?",
+            "After proof upload, does submit still fail?",
+        ),
+        "emi_issue": (
+            "Understood. What do you see when opening EMI option?",
+            "Okay. Is any eligibility message visible there?",
+            "Do you get an error while submitting EMI request?",
+        ),
+        "otp_issue": (
+            "Understood. What message is visible on OTP screen now?",
+            "Okay. After resend, do you see any new message?",
+            "Do you receive SMS but OTP is still not accepted?",
+        ),
+        "login_issue": (
+            "I see. What exact message is visible on login page?",
+            "Okay. After entering mobile, does OTP screen open?",
+            "Do you get immediate error after entering password?",
+        ),
+        "application_status_issue": (
+            "Understood. What is visible now on status tracking page?",
+            "Okay. After entering tracking details, does page load?",
+            "Does the status line change or remain the same?",
+        ),
+        "document_upload": (
+            "Understood. What is visible now on document upload page?",
+            "Okay. What message appears right after choosing file?",
+            "When you submit, does upload still not complete?",
+        ),
+        "generic_process_help": (
+            "Understood. Which exact step are you stuck on right now?",
+            "Okay. What text is visible on that screen?",
+            "Can you read the same line shown there?",
+        ),
     }
-    return prompts[issue_type]
+    return prompts[issue_type][stage_index]
 
 
 def build_issue_resolution_reply(
@@ -435,90 +649,92 @@ def build_issue_resolution_reply(
     language = normalize_language(language)
     if language == "hi-IN":
         replies = {
-            ("aadhaar_upload", "error_message"): "ठीक है, कोई बात नहीं। स्क्रीन पर जो error लिखा है, वही पढ़कर बताइए।",
-            ("aadhaar_upload", "access_issue"): "समझ गई। अगर पूरा message नहीं पढ़ पा रहे, तो जो शब्द दिख रहे हैं वही बताइए।",
-            ("aadhaar_upload", "blurred_image"): "बिल्कुल। Aadhaar की clear photo लेकर, सभी corners दिखाकर फिर upload कीजिए।",
-            ("aadhaar_upload", "upload_blocked"): "ठीक है। app reopen कीजिए, network check कीजिए, फिर Aadhaar upload दोबारा कीजिए।",
-            ("aadhaar_upload", "incorrect_details"): "लगता है details साफ़ नहीं दिख रहीं। नाम और DOB clear वाली image फिर से upload कीजिए।",
-            ("pan_upload", "blurred_image"): "कोई बात नहीं। PAN की clear फोटो लेकर फिर upload कीजिए।",
-            ("pan_upload", "upload_blocked"): "ठीक है। app फिर खोलकर PAN upload step दोबारा try कीजिए।",
-            ("pan_upload", "error_message"): "समझ गई। PAN step पर जो error दिख रहा है, वह पढ़कर बताइए।",
-            ("photo_upload", "blurred_image"): "ठीक है। अच्छी light में clear selfie लेकर दोबारा upload कीजिए।",
-            ("photo_upload", "upload_blocked"): "कोई बात नहीं। नई selfie लेकर upload फिर से try कीजिए।",
-            ("photo_upload", "incorrect_details"): "ठीक है। चेहरा center में रखकर बिना shadow की selfie upload कीजिए।",
-            ("application_error_issue", "error_message"): "समझ गई। app पर दिख रहा error message बताइए, मैं next step बताती हूँ।",
-            ("application_error_issue", "access_issue"): "ठीक है। app बंद करके फिर खोलिए और वही step दोबारा कीजिए।",
-            ("application_error_issue", "upload_blocked"): "कोई बात नहीं। उसी request step को refresh करके फिर submit कीजिए।",
-            ("statement_issue", "not_found"): "ठीक है। statement section refresh करके फिर check कीजिए।",
-            ("statement_issue", "access_issue"): "समझ गई। statement file open नहीं हो रही तो password format फिर verify कीजिए।",
-            ("invoice_issue", "not_found"): "कोई बात नहीं। documents/downloads section refresh करके invoice फिर check कीजिए।",
-            ("invoice_issue", "error_message"): "ठीक है। invoice step का error message पढ़कर बताइए।",
-            ("invoice_issue", "upload_blocked"): "समझ गई। network check करके invoice download फिर try कीजिए।",
-            ("refund_issue", "not_found"): "ठीक है। refund reference से status दोबारा check कीजिए।",
-            ("refund_issue", "error_message"): "समझ गई। refund से जुड़ा message या reference बताइए।",
-            ("card_block_issue", "not_found"): "ठीक है। card controls खोलकर block/unblock option फिर देखिए।",
-            ("card_block_issue", "error_message"): "कोई बात नहीं। card block/unblock वाला error बताइए।",
-            ("address_update_issue", "access_issue"): "ठीक है। OTP verify करके address proof upload करें और submit फिर try करें।",
-            ("address_update_issue", "upload_blocked"): "समझ गई। address proof की clear image/PDF चुनकर upload दोबारा कीजिए।",
-            ("emi_issue", "not_found"): "ठीक है। eligible transaction खोलकर EMI option फिर check कीजिए।",
-            ("emi_issue", "error_message"): "समझ गई। EMI request वाला error message बताइए।",
-            ("otp_issue", "not_found"): "ठीक है। कुछ सेकंड रुककर resend OTP दबाइए और inbox check कीजिए। OTP share मत कीजिए।",
-            ("otp_issue", "upload_blocked"): "कोई बात नहीं। app reopen करके OTP फिर request कीजिए। OTP किसी को मत बताइए।",
-            ("login_issue", "error_message"): "ठीक है। login screen पर जो error है, वह पढ़कर बताइए।",
-            ("login_issue", "access_issue"): "समझ गई। registered mobile और password/OTP details फिर check कीजिए।",
-            ("login_issue", "incorrect_details"): "ठीक है। details ध्यान से फिर डालिए; जरूरत हो तो reset option use कीजिए।",
-            ("login_issue", "not_found"): "कोई बात नहीं। app refresh करके sign-in page दोबारा खोलिए।",
-            ("application_status_issue", "not_found"): "ठीक है। tracking page refresh करके status फिर check कीजिए।",
-            ("application_status_issue", "error_message"): "समझ गई। status page पर दिख रहा error message बताइए।",
-            ("application_status_issue", "access_issue"): "ठीक है। app या tracking page फिर खोलकर internet check के बाद status देखिए।",
-            ("document_upload", "upload_blocked"): "कोई बात नहीं। file फिर चुनकर clear copy upload कीजिए।",
-            ("document_upload", "error_message"): "ठीक है। document upload वाला error message बताइए।",
-            ("document_upload", "access_issue"): "समझ गई। जो message पढ़ पा रहे हैं उतना बताइए, मैं उसी से guide करूँगी।",
-            ("document_upload", "blurred_image"): "ठीक है। document की clear copy लेकर फिर upload कीजिए।",
+            ("aadhaar_upload", "error_message"): "ठीक है। स्क्रीन पर जो एरर है, वही पढ़कर बताइए।",
+            ("aadhaar_upload", "access_issue"): "समझ गई। पूरा संदेश न दिखे तो जो शब्द दिख रहे हैं, वही बताइए।",
+            ("aadhaar_upload", "blurred_image"): "ठीक है। Aadhaar की साफ़ फोटो लेकर फिर अपलोड कीजिए।",
+            ("aadhaar_upload", "upload_blocked"): "समझ गई। ऐप फिर खोलिए और Aadhaar अपलोड दोबारा कीजिए।",
+            ("aadhaar_upload", "incorrect_details"): "ठीक है। नाम और जन्म-तिथि साफ़ दिखने वाली Aadhaar फोटो अपलोड कीजिए।",
+            ("pan_upload", "blurred_image"): "ठीक है। PAN की साफ़ फोटो लेकर फिर अपलोड कीजिए।",
+            ("pan_upload", "upload_blocked"): "समझ गई। ऐप फिर खोलिए और PAN अपलोड दोबारा कीजिए।",
+            ("pan_upload", "error_message"): "ठीक है। PAN चरण का एरर संदेश पढ़कर बताइए।",
+            ("photo_upload", "blurred_image"): "ठीक है। अच्छी रोशनी में साफ़ सेल्फी लेकर फिर अपलोड कीजिए।",
+            ("photo_upload", "upload_blocked"): "समझ गई। नई सेल्फी लेकर अपलोड फिर से कीजिए।",
+            ("photo_upload", "incorrect_details"): "ठीक है। चेहरा बीच में रखकर साफ़ सेल्फी अपलोड कीजिए।",
+            ("application_error_issue", "error_message"): "ठीक है। ऐप पर जो एरर दिख रहा है, वही बताइए।",
+            ("application_error_issue", "access_issue"): "समझ गई। ऐप बंद करके फिर खोलिए, फिर वही चरण दोबारा कीजिए।",
+            ("application_error_issue", "upload_blocked"): "ठीक है। उसी चरण को रीफ्रेश करके फिर सबमिट कीजिए।",
+            ("statement_issue", "not_found"): "ठीक है। स्टेटमेंट सेक्शन रीफ्रेश करके फिर देखिए।",
+            ("statement_issue", "access_issue"): "समझ गई। स्टेटमेंट फाइल का पासवर्ड प्रारूप फिर जाँचिए।",
+            ("invoice_issue", "not_found"): "ठीक है। इनवॉइस सेक्शन रीफ्रेश करके फिर देखिए।",
+            ("invoice_issue", "error_message"): "समझ गई। इनवॉइस का एरर संदेश पढ़कर बताइए।",
+            ("invoice_issue", "upload_blocked"): "ठीक है। नेटवर्क जाँचकर इनवॉइस डाउनलोड फिर कीजिए।",
+            ("refund_issue", "not_found"): "समझ गई। रिफंड रेफरेंस से स्थिति फिर जाँचिए।",
+            ("refund_issue", "error_message"): "ठीक है। रिफंड से जुड़ा संदेश या रेफरेंस बताइए।",
+            ("refund_issue", "incorrect_details"): "ठीक है। अपेक्षित राशि और दिख रही राशि दोनों बताइए, मैं अगला कदम बताती हूँ।",
+            ("card_block_issue", "not_found"): "समझ गई। कार्ड कंट्रोल में ब्लॉक या अनब्लॉक विकल्प फिर देखें।",
+            ("card_block_issue", "error_message"): "ठीक है। ब्लॉक या अनब्लॉक का एरर संदेश बताइए।",
+            ("address_update_issue", "access_issue"): "समझ गई। OTP सत्यापित करके पता प्रमाण अपलोड करें और फिर भेजें।",
+            ("address_update_issue", "upload_blocked"): "ठीक है। पता प्रमाण की साफ़ छवि या पीडीएफ फिर अपलोड करें।",
+            ("emi_issue", "not_found"): "समझ गई। पात्र लेन-देन खोलकर EMI विकल्प फिर देखें।",
+            ("emi_issue", "error_message"): "ठीक है। EMI अनुरोध का एरर संदेश पढ़कर बताइए।",
+            ("otp_issue", "not_found"): "ठीक है। कुछ सेकंड बाद OTP फिर मंगाइए और SMS देखें। OTP साझा न करें।",
+            ("otp_issue", "upload_blocked"): "समझ गई। ऐप फिर खोलकर OTP दोबारा मंगाइए। OTP साझा न करें।",
+            ("login_issue", "error_message"): "ठीक है। लॉगिन स्क्रीन का एरर संदेश पढ़कर बताइए।",
+            ("login_issue", "access_issue"): "समझ गई। पंजीकृत मोबाइल और पासवर्ड या OTP फिर जाँचिए।",
+            ("login_issue", "incorrect_details"): "ठीक है। जानकारी ध्यान से फिर भरिए, फिर दोबारा प्रयास कीजिए।",
+            ("login_issue", "not_found"): "समझ गई। ऐप रीफ्रेश करके साइन-इन पेज फिर खोलिए।",
+            ("application_status_issue", "not_found"): "ठीक है। ट्रैकिंग पेज रीफ्रेश करके स्थिति फिर देखिए।",
+            ("application_status_issue", "error_message"): "समझ गई। स्थिति पेज का एरर संदेश पढ़कर बताइए।",
+            ("application_status_issue", "access_issue"): "ठीक है। नेटवर्क जाँचकर ट्रैकिंग पेज फिर खोलिए।",
+            ("document_upload", "upload_blocked"): "समझ गई। फाइल फिर चुनकर साफ़ कॉपी अपलोड कीजिए।",
+            ("document_upload", "error_message"): "ठीक है। दस्तावेज़ अपलोड का एरर संदेश बताइए।",
+            ("document_upload", "access_issue"): "समझ गई। जो शब्द दिख रहे हैं, वही पढ़कर बताइए।",
+            ("document_upload", "blurred_image"): "ठीक है। दस्तावेज़ की साफ़ कॉपी लेकर फिर अपलोड कीजिए।",
         }
-        return replies.get((issue_type, symptom), "ठीक है। अभी स्क्रीन पर exactly क्या दिख रहा है, वही बताइए।")
+        return replies.get((issue_type, symptom), "ठीक है। अभी स्क्रीन पर क्या दिख रहा है, वही बताइए।")
 
     replies = {
-        ("aadhaar_upload", "error_message"): "No worries. Please read the Aadhaar error message and I’ll guide you immediately.",
-        ("aadhaar_upload", "access_issue"): "If the full message is not visible, tell me the words you can see.",
-        ("aadhaar_upload", "blurred_image"): "Please upload a clear Aadhaar image with all corners visible.",
-        ("aadhaar_upload", "upload_blocked"): "Please reopen the app, check network, and upload Aadhaar again.",
-        ("aadhaar_upload", "incorrect_details"): "Please use the Aadhaar image where name and date of birth are clearly visible.",
-        ("pan_upload", "blurred_image"): "Please upload a clear PAN image with details readable.",
+        ("aadhaar_upload", "error_message"): "No worries. Please read the Aadhaar error message.",
+        ("aadhaar_upload", "access_issue"): "If the full message is not visible, share the words you can see.",
+        ("aadhaar_upload", "blurred_image"): "Please upload a clear Aadhaar image with visible details.",
+        ("aadhaar_upload", "upload_blocked"): "Please reopen the app and retry Aadhaar upload.",
+        ("aadhaar_upload", "incorrect_details"): "Please use an Aadhaar image where details are clearly visible.",
+        ("pan_upload", "blurred_image"): "Please upload a clear PAN image.",
         ("pan_upload", "upload_blocked"): "Please reopen the app and retry PAN upload once.",
         ("pan_upload", "error_message"): "Please read the PAN upload error message.",
-        ("photo_upload", "blurred_image"): "Please retake a clear selfie in good light and upload again.",
-        ("photo_upload", "upload_blocked"): "Please retry selfie upload once after reopening the app.",
-        ("photo_upload", "incorrect_details"): "Please keep your face centered and clear, then upload a new selfie.",
-        ("application_error_issue", "error_message"): "Please share the exact app error message on screen.",
-        ("application_error_issue", "access_issue"): "Please close and reopen the app, then continue the same step.",
-        ("application_error_issue", "upload_blocked"): "Please refresh and submit the same step again.",
+        ("photo_upload", "blurred_image"): "Please retake a clear selfie in good light.",
+        ("photo_upload", "upload_blocked"): "Please retry selfie upload once.",
+        ("photo_upload", "incorrect_details"): "Please keep your face centered and upload a new selfie.",
+        ("application_error_issue", "error_message"): "Please share the app error message shown on screen.",
+        ("application_error_issue", "access_issue"): "Please close and reopen the app, then retry the same step.",
+        ("application_error_issue", "upload_blocked"): "Please refresh that step and submit again.",
         ("statement_issue", "not_found"): "Please refresh the statement section and check again.",
-        ("statement_issue", "access_issue"): "Please verify the statement file password format and retry.",
-        ("invoice_issue", "not_found"): "Please refresh documents/downloads section and check invoice again.",
+        ("statement_issue", "access_issue"): "Please verify statement file password format and retry.",
+        ("invoice_issue", "not_found"): "Please refresh the invoice section and check again.",
         ("invoice_issue", "error_message"): "Please read the invoice error message.",
         ("invoice_issue", "upload_blocked"): "Please check network and retry invoice download.",
-        ("refund_issue", "not_found"): "Please recheck refund status using your refund reference.",
+        ("refund_issue", "not_found"): "Please recheck refund status using your reference.",
         ("refund_issue", "error_message"): "Please read the refund-related message or reference.",
-        ("card_block_issue", "not_found"): "Please open card controls and check block/unblock option again.",
-        ("card_block_issue", "error_message"): "Please read the block/unblock error message.",
+        ("refund_issue", "incorrect_details"): "Please share expected amount and shown amount so I can guide next steps.",
+        ("card_block_issue", "not_found"): "Please open card controls and check block or unblock option.",
+        ("card_block_issue", "error_message"): "Please read the block or unblock error message.",
         ("address_update_issue", "access_issue"): "Please verify OTP, upload address proof, and submit again.",
-        ("address_update_issue", "upload_blocked"): "Please choose a clear address proof image/PDF and upload again.",
-        ("emi_issue", "not_found"): "Please open eligible transaction and check EMI option again.",
+        ("address_update_issue", "upload_blocked"): "Please choose a clear address proof image or PDF and upload again.",
+        ("emi_issue", "not_found"): "Please open the eligible transaction and check EMI option again.",
         ("emi_issue", "error_message"): "Please read the EMI request error message.",
-        ("otp_issue", "not_found"): "Please wait a few seconds, tap resend OTP once, and check SMS inbox. Do not share OTP.",
+        ("otp_issue", "not_found"): "Please request OTP again and check SMS inbox. Do not share OTP.",
         ("otp_issue", "upload_blocked"): "Please reopen the app and request OTP again. Do not share OTP.",
         ("login_issue", "error_message"): "Please read the login error message.",
-        ("login_issue", "access_issue"): "Please verify registered mobile and password/OTP details, then sign in again.",
-        ("login_issue", "incorrect_details"): "Please re-enter details carefully. If needed, use reset option.",
-        ("login_issue", "not_found"): "Please refresh app and reopen sign-in screen.",
+        ("login_issue", "access_issue"): "Please verify registered mobile and password or OTP, then sign in again.",
+        ("login_issue", "incorrect_details"): "Please re-enter details carefully and try again.",
+        ("login_issue", "not_found"): "Please refresh the app and reopen sign-in screen.",
         ("application_status_issue", "not_found"): "Please refresh tracking page and check status again.",
-        ("application_status_issue", "error_message"): "Please read the application status error message.",
-        ("application_status_issue", "access_issue"): "Please reopen tracking page, check network, and retry status lookup.",
-        ("document_upload", "upload_blocked"): "Please reselect file and upload a clear copy.",
+        ("application_status_issue", "error_message"): "Please read the status page error message.",
+        ("application_status_issue", "access_issue"): "Please reopen tracking page and retry after checking network.",
+        ("document_upload", "upload_blocked"): "Please reselect the file and upload a clear copy.",
         ("document_upload", "error_message"): "Please read the document upload error message.",
         ("document_upload", "access_issue"): "If full message is not visible, share the visible words.",
-        ("document_upload", "blurred_image"): "Please upload a clear document copy with all corners visible.",
+        ("document_upload", "blurred_image"): "Please upload a clear document copy.",
     }
     return replies.get((issue_type, symptom), "Please tell me exactly what is visible on your screen right now.")
 
@@ -540,8 +756,8 @@ def looks_like_general_banking_question(text: str) -> bool:
 def build_repair_prompt(language: str = "en-IN") -> str:
     language = normalize_language(language)
     if language == "hi-IN":
-        return "माफ़ कीजिए, मैं आपकी बात सही तरह से समझना चाहती हूँ। जिस जगह दिक्कत आ रही है, वही दोबारा बोलिए।"
-    return "Sorry, I want to understand this correctly. Please say again where exactly the problem is happening."
+        return "माफ़ कीजिए, मैं आपकी मदद के लिए हूँ। जिस चरण में दिक्कत है, वही फिर से बताइए।"
+    return "Sorry, I want to help you quickly. Please repeat the exact step where the issue occurs."
 
 
 def _contains_any(text: str, choices: tuple[str, ...]) -> bool:
