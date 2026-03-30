@@ -215,13 +215,6 @@ LANGUAGE_SWITCH_ONLY_BLOCKLIST = [
     "interest", "fees", "charges", "payment", "bill", "due",
 ]
 
-KNOWN_HINDI_NAME_MAP = {
-    "satish": "सतीश",
-    "sateesh": "सतीश",
-    "sathish": "सतीश",
-}
-
-
 def normalize_language(language: str | None) -> str:
     if language in SUPPORTED_VOICE_LANGUAGES:
         return language
@@ -242,15 +235,16 @@ def build_opening_greeting(
         salutation = _build_hindi_salutation(clean_name).rstrip("।")
         return (
             f"{salutation}, मैं {assistant_name} हूँ, BOB Card की एआई वॉइस सहायक बोल रही हूँ। "
-            "आपने credit card के लिए आवेदन किया था, उसी प्रक्रिया को आगे बढ़ाने के लिए कॉल कर रही हूँ। "
+            "यह कॉल गुणवत्ता के लिए रिकॉर्ड की जा रही है। "
+            "आपका क्रेडिट कार्ड आवेदन अधूरा है, उसे पूरा कराने के लिए मैं कॉल कर रही हूँ। "
             "क्या अभी दो मिनट बात करना ठीक रहेगा?"
         )
 
     display_name = f"{clean_name} ji" if clean_name else "there"
     return (
         f"Hello {display_name}. I am {assistant_name}, an AI assistant calling on behalf of Bank of Baroda. "
-        "This call is recorded for quality and training purposes. "
-        "I am calling regarding your BOBCards credit card application that was left incomplete. "
+        "This call is recorded for quality purposes. "
+        "Your BOBCards credit card application is incomplete, and I am calling to help you complete it. "
         "Is this a good time to speak for two minutes?"
     )
 
@@ -350,7 +344,7 @@ def build_context_setting_prompt(language: str = "en-IN", name: str = "") -> str
     clean_name = _normalize_name(name)
     if normalize_language(language) == "hi-IN":
         prefix = f"{clean_name} ji, " if clean_name else ""
-        return f"{prefix}मैं आपकी मदद के लिए हूँ। अभी बताइए किस चरण में दिक्कत आ रही है।"
+        return f"{prefix}मैं आपकी मदद के लिए हूँ। मैं आपको एक लिंक शेयर कर रही हूँ, कृपया उसे ओपन करें।"
     prefix = f"{clean_name}, " if clean_name else ""
     return (
         f"{prefix}I am calling to help with the BOB Card application or banking step "
@@ -396,8 +390,8 @@ def build_product_info_follow_up_prompt(language: str = "en-IN") -> str:
 
 def build_human_handoff_reply(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
-        return "इस हिस्से में मैं पक्की जानकारी नहीं दे पा रही हूँ। ज़रूरत हो तो मैं callback का अनुरोध नोट कर सकती हूँ।"
-    return "I am not fully confident about that part. If you want, I can note a callback request."
+        return "मैं अभी आपको मानव एजेंट से जोड़ रही हूँ। कृपया लाइन पर रहें।"
+    return "I will connect you to a human agent now. Please stay on the line."
 
 
 def build_empty_input_reply(language: str = "en-IN") -> str:
@@ -454,6 +448,18 @@ def build_sms_link_ack(language: str = "en-IN") -> str:
     return "Thank you. I will note that you want an SMS link for follow up. Goodbye."
 
 
+def build_process_restart_link_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "जी, मैं आपको एक लिंक शेयर कर सकती हूँ ताकि हम प्रक्रिया फिर से शुरू कर सकें।"
+    return "Yes, I can share a link so we can start the process again."
+
+
+def build_link_not_received_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "जी, माफ़ कीजिए। मैं लिंक अभी दोबारा भेज रही हूँ।"
+    return "Sorry, I will resend the link right away."
+
+
 def build_short_choice_prompt(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
         return "कृपया बाद में कॉल या लिंक भेजें बोलिए।"
@@ -487,6 +493,13 @@ def detect_resolution_choice(text: str) -> ResolutionChoice:
         "no",
         "nope",
         "no thanks",
+        "done",
+        "resolved",
+        "ho gaya",
+        "ho gya",
+        "hogaya",
+        "हो गया",
+        "होगया",
         "nothing else",
         "that is all",
         "thats all",
@@ -655,9 +668,12 @@ def build_opted_out_notice(language: str = "en-IN") -> str:
     return "Your number is marked as opted out. We will not continue this automated call. Thank you."
 
 
-def detect_consent_choice(text: str) -> ConsentChoice:
+def detect_consent_choice(text: str, current_stage: str | None = None) -> ConsentChoice:
     normalized = _normalize_choice_text(text)
     if not normalized:
+        return "unknown"
+
+    if current_stage and current_stage not in {OPENING, CONSENT_CHECK}:
         return "unknown"
 
     opt_out_markers = (
@@ -825,10 +841,12 @@ def _normalize_hindi_name(name: str) -> str:
     clean_name = _normalize_name(name)
     if not clean_name:
         return ""
-    if not _contains_latin_text(clean_name):
-        return clean_name
-    token = clean_name.lower().strip()
-    return KNOWN_HINDI_NAME_MAP.get(token, "")
+    # Use the actual customer-provided name dynamically.
+    # If the name is already in Devanagari, keep it as-is.
+    # If it's in Latin script, keep it readable for TTS rather than dropping it.
+    if _contains_latin_text(clean_name):
+        return " ".join(part.capitalize() for part in clean_name.split())
+    return clean_name
 
 
 def build_user_context(

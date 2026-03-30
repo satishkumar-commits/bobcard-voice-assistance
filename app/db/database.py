@@ -38,8 +38,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    from app.db.models import Call, OptOut, Transcript  # noqa: F401
+    from app.db.models import Call, CallEvent, OptOut, Transcript  # noqa: F401
 
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
-

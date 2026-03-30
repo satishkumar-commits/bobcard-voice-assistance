@@ -112,6 +112,7 @@ class MediaStreamSession:
     tts_slow_mode_until: float = 0.0
     rollout_bucket: int = 0
     last_noise_reprompt_at: float = 0.0
+    last_assistant_prompt_text: str = ""
     closed: bool = False
 
 
@@ -569,12 +570,14 @@ class TwilioMediaStreamService:
                         "queue_depth": queue.qsize(),
                     }
                 )
-                if queue_wait_ms > 800 and queue.qsize() > 0:
+                stale_queue_threshold_ms = 900
+                if queue_wait_ms > stale_queue_threshold_ms:
                     logger.warning(
-                        "Dropping stale dequeued utterance for call=%s queue_wait_ms=%s remaining_queue=%s",
+                        "Dropping stale dequeued utterance for call=%s queue_wait_ms=%s remaining_queue=%s threshold_ms=%s",
                         session.call_sid,
                         queue_wait_ms,
                         queue.qsize(),
+                        stale_queue_threshold_ms,
                     )
                     emit_latency_event(
                         {
@@ -583,6 +586,7 @@ class TwilioMediaStreamService:
                             "event_timestamp": utc_now_iso(),
                             "queue_wait_ms": queue_wait_ms,
                             "remaining_queue_depth": queue.qsize(),
+                            "threshold_ms": stale_queue_threshold_ms,
                         }
                     )
                     continue
@@ -917,6 +921,7 @@ class TwilioMediaStreamService:
             return
 
         try:
+            session.last_assistant_prompt_text = sanitize_spoken_text(reply.text, max_length=220)
             session.assistant_playback_started_at = asyncio.get_running_loop().time()
             session.barge_in_speech_ms = 0
             session.playback_started_notified = False
@@ -933,8 +938,17 @@ class TwilioMediaStreamService:
                 },
             )
             await self.realtime_service.publish_call_phase(session.call_sid, TTS_REQUESTED)
-            sentence_max_chars = self._effective_sentence_limit(session)
-            reply_chunks = self._chunk_reply_for_tts(reply.text, max_chars=sentence_max_chars)
+            max_reply_chars = max(80, int(self.settings.assistant_tts_max_chars))
+            if self._is_opening_greeting_text(reply.text, reply.language_code):
+                max_reply_chars = max(max_reply_chars, 480)
+            cleaned_reply_text = sanitize_spoken_text(reply.text, max_length=max_reply_chars)
+            # Keep short/medium replies in a single provider request for smoother, continuous playback.
+            if cleaned_reply_text and len(cleaned_reply_text) <= max_reply_chars:
+                sentence_max_chars = max_reply_chars
+                reply_chunks = [cleaned_reply_text]
+            else:
+                sentence_max_chars = self._effective_sentence_limit(session)
+                reply_chunks = self._chunk_reply_for_tts(reply.text, max_chars=sentence_max_chars)
             first_audio_chunk_ref = {"pending": True}
             if len(reply_chunks) > 1:
                 logger.info(
@@ -962,6 +976,7 @@ class TwilioMediaStreamService:
                     language_code=reply.language_code,
                     streaming_codec=streaming_codec,
                     first_audio_chunk_ref=first_audio_chunk_ref,
+                    allow_slow_mode=not self._is_critical_prompt_text(session.last_assistant_prompt_text, reply.language_code),
                 )
 
             await self._send_json(
@@ -989,6 +1004,23 @@ class TwilioMediaStreamService:
             await asyncio.sleep(0.5)
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(self.twilio_service.end_call, session.call_sid)
+
+    @staticmethod
+    def _is_opening_greeting_text(text: str, language_code: str) -> bool:
+        normalized_text = sanitize_spoken_text(text).lower()
+        if not normalized_text:
+            return False
+        if language_code == "hi-IN":
+            return (
+                "एआई वॉइस सहायक" in normalized_text
+                and "रिकॉर्ड की जा रही" in normalized_text
+                and "दो मिनट" in normalized_text
+            )
+        return (
+            "ai assistant" in normalized_text
+            and "recorded for quality" in normalized_text
+            and "two minutes" in normalized_text
+        )
 
     async def _play_streamed_sentences(
         self,
@@ -1081,6 +1113,7 @@ class TwilioMediaStreamService:
         language_code: str,
         streaming_codec: str,
         first_audio_chunk_ref: dict[str, bool],
+        allow_slow_mode: bool = True,
     ) -> None:
         if streaming_codec != "mulaw":
             raise RuntimeError(f"Unsupported streaming codec for Twilio media stream: {streaming_codec}")
@@ -1104,11 +1137,12 @@ class TwilioMediaStreamService:
                     chunk_kind="mulaw",
                 )
             await self._send_mulaw_audio(session, mulaw_audio)
-        self._update_tts_slow_mode(
-            session,
-            tts_latency_ms=int((perf_counter() - started_at) * 1000),
-            audio_bytes=total_audio_bytes,
-        )
+        if allow_slow_mode:
+            self._update_tts_slow_mode(
+                session,
+                tts_latency_ms=int((perf_counter() - started_at) * 1000),
+                audio_bytes=total_audio_bytes,
+            )
 
     async def _cancel_playback(self, session: MediaStreamSession, reason: str) -> None:
         if not session.playback_task or session.playback_task.done():
@@ -1137,7 +1171,13 @@ class TwilioMediaStreamService:
         with contextlib.suppress(asyncio.CancelledError):
             await session.playback_task
         # Reset persistent TTS stream only for hard interruption cases to avoid audible restart artifacts.
-        if session.tts_persistent_ws_enabled and reason in {"customer-speech-no-transcript", "customer-speech"}:
+        strong_reset_speech_ms = max(self.settings.stream_barge_in_min_speech_ms + 120, 900)
+        should_reset_stream = (
+            session.tts_persistent_ws_enabled
+            and reason in {"customer-speech-no-transcript", "customer-speech"}
+            and session.barge_in_speech_ms >= strong_reset_speech_ms
+        )
+        if should_reset_stream:
             with contextlib.suppress(Exception):
                 await self.tts_service.reset_call_stream(
                     session.call_sid,
@@ -1259,10 +1299,9 @@ class TwilioMediaStreamService:
                 return
             self._tts_warmed_languages.add(normalized_language)
 
-        # Let first live turn start immediately; warmup runs opportunistically in background.
-        await asyncio.sleep(1.0)
+        # Keep warmup away from greeting playback to avoid competing with live call TTS.
+        await asyncio.sleep(12.0)
         prompts = [
-            build_opening_greeting(language=normalized_language),
             build_identity_verification_prompt(language=normalized_language),
             "नमस्ते।" if normalized_language == "hi-IN" else "Hello.",
         ]
@@ -1402,6 +1441,11 @@ class TwilioMediaStreamService:
         minimum_playback_ms = max(grace_ms, self.settings.stream_barge_in_min_playback_ms)
         hard_floor_ms = max(grace_ms, minimum_playback_ms // 2)
         required_speech_ms = max(160, self.settings.stream_barge_in_min_speech_ms, self.settings.barge_in_min_speech_ms)
+        if self._is_critical_prompt_text(session.last_assistant_prompt_text, session.language):
+            grace_ms = max(grace_ms, 900)
+            minimum_playback_ms = max(minimum_playback_ms, 1700)
+            hard_floor_ms = max(hard_floor_ms, 900)
+            required_speech_ms = max(required_speech_ms, 980)
         strong_speech_ms = max(required_speech_ms + 220, int(required_speech_ms * 1.9))
         if elapsed_ms < hard_floor_ms:
             self._record_barge_in_gate_block(
@@ -1469,6 +1513,33 @@ class TwilioMediaStreamService:
             }
         )
         return True
+
+    @staticmethod
+    def _is_critical_prompt_text(text: str, language_code: str) -> bool:
+        normalized = sanitize_spoken_text(text).lower()
+        if not normalized:
+            return False
+        if language_code == "hi-IN":
+            critical_markers = (
+                "एआई वॉइस सहायक",
+                "रिकॉर्ड की जा रही",
+                "दो मिनट बात",
+                "क्या मैं",
+                "हाँ या नहीं",
+                "लिंक",
+                "दोबारा भेज",
+            )
+        else:
+            critical_markers = (
+                "ai assistant",
+                "recorded for quality",
+                "two-minute",
+                "am i speaking",
+                "yes or no",
+                "resend the link",
+                "share a link",
+            )
+        return any(marker in normalized for marker in critical_markers)
 
     def _record_barge_in_gate_block(
         self,
@@ -1576,8 +1647,9 @@ class TwilioMediaStreamService:
         if not cleaned:
             return True
         normalized = re.sub(r"\s+", " ", cleaned).strip().lower()
-        greeting_tokens = {"hello", "hi", "hii", "हलो", "हैलो", "नमस्ते"}
-        if normalized in greeting_tokens:
+        compact = re.sub(r"[^\w\u0900-\u097F]+", " ", normalized).strip()
+        greeting_tokens = {"hello", "hi", "hii", "हलो", "हैलो", "हेलो", "नमस्ते"}
+        if compact in greeting_tokens:
             return False
         if is_short_valid_intent(cleaned):
             return False
@@ -1588,6 +1660,9 @@ class TwilioMediaStreamService:
         if detect_consent_choice(cleaned) != "unknown":
             return False
         if detect_escalation_request(cleaned):
+            return False
+        # Avoid dropping short but valid acknowledgements such as "हेलो", "hello", "जी", etc.
+        if len(compact) > 1 and any(ch.isalpha() for ch in compact):
             return False
 
         meaningful_chars = sum(1 for char in normalized if char.isalnum())

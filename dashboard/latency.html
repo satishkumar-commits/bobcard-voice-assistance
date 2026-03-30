@@ -3,88 +3,97 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>BOB Card Latency Monitor</title>
-    <link rel="stylesheet" href="/dashboard/latency.css" />
+    <title>Latency Analytics</title>
+    <link rel="stylesheet" href="/dashboard/latency.css?v=20260330-1" />
   </head>
   <body>
-    <div class="monitor-shell">
-      <aside class="app-rail">
-        <div class="brand">Latency Ops</div>
-        <span id="wsState" class="status-chip disconnected">disconnected</span>
-        <nav class="rail-nav">
-          <a class="rail-item active" href="#">Call Logs</a>
-          <a class="rail-item console-link" href="/dashboard/">Conversation Console</a>
-        </nav>
-      </aside>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="topbar-left">
+          <h1>Latency Analytics</h1>
+          <span id="wsState" class="ws-state disconnected">Disconnected</span>
+        </div>
+        <div class="topbar-controls">
+          <input id="callSidInput" type="text" placeholder="Enter Call SID" />
+          <button id="watchButton" type="button">Watch</button>
+          <button id="allCallsButton" type="button" class="ghost">All Calls</button>
+          <button id="refreshCallsButton" type="button" class="ghost">Refresh</button>
+          <select id="recentCallsSelect" aria-label="Recent calls">
+            <option value="">Recent Calls</option>
+          </select>
+          <a href="/dashboard/" class="console-link">Conversation Console</a>
+        </div>
+      </header>
 
-      <main class="workspace">
-        <section class="workspace-grid">
-          <section class="calls-pane panel">
-            <div class="panel-head">
-              <h2>Call Logs</h2>
-              <button id="refreshCallsButton" class="mini-btn" type="button">Refresh</button>
-            </div>
-            <div class="filter-row">
-              <input id="callSidFilter" type="text" placeholder="Filter by Call SID..." />
-              <button id="watchCallButton" class="mini-btn primary" type="button">Watch</button>
-              <button id="clearFilterButton" class="mini-btn" type="button">All</button>
-            </div>
-            <div id="recentCalls" class="recent-calls empty">Loading recent calls...</div>
-          </section>
+      <main class="split-layout">
+        <section class="pane" data-pane="backend">
+          <div class="pane-tabs">
+            <button type="button" class="tab active" data-pane="backend" data-tab="conversation">Conversation (Backend)</button>
+            <button type="button" class="tab" data-pane="backend" data-tab="logs">System Logs</button>
+            <button type="button" class="tab" data-pane="backend" data-tab="analytics">Latency Analytics</button>
+          </div>
 
-          <section class="stream-pane panel">
-            <div class="panel-head stream-head">
-              <div>
-                <h2>Live Latency Events</h2>
-                <p id="feedSubtitle" class="panel-copy">Streaming all calls.</p>
-              </div>
-              <label class="toggle">
-                <input id="autoScrollToggle" type="checkbox" checked />
-                <span>Auto scroll</span>
-              </label>
-            </div>
-            <div class="wave-strip" aria-hidden="true"></div>
-            <div class="table-wrap">
-              <table class="latency-table">
+          <div class="pane-content" data-pane-content="backend" data-tab-content="conversation">
+            <div id="backendConversation" class="timeline" role="log" aria-live="polite"></div>
+          </div>
+
+          <div class="pane-content hidden" data-pane-content="backend" data-tab-content="logs">
+            <pre id="backendLogs" class="log-view"></pre>
+          </div>
+
+          <div class="pane-content hidden" data-pane-content="backend" data-tab-content="analytics">
+            <div class="analytics-head" id="backendAnalyticsSummary"></div>
+            <div class="analytics-table-wrap">
+              <table class="analytics-table">
                 <thead>
                   <tr>
-                    <th>Time</th>
                     <th>Step</th>
-                    <th>Call</th>
-                    <th>Latency</th>
-                    <th>Details</th>
+                    <th>Count</th>
+                    <th>Latest</th>
+                    <th>Average</th>
                   </tr>
                 </thead>
-                <tbody id="latencyTableBody">
-                  <tr class="empty-row">
-                    <td colspan="5">Waiting for realtime latency events...</td>
-                  </tr>
-                </tbody>
+                <tbody id="backendAnalyticsTable"></tbody>
               </table>
             </div>
-          </section>
+          </div>
+        </section>
 
-          <aside class="details-pane panel">
-            <h2>Call Details</h2>
-            <div class="detail-list">
-              <div class="detail-item"><span>Active Call</span><strong id="activeCallValue">All calls</strong></div>
-              <div class="detail-item"><span>Last STT</span><strong id="sttMetric">-</strong></div>
-              <div class="detail-item"><span>Last Gemini</span><strong id="geminiMetric">-</strong></div>
-              <div class="detail-item"><span>Last TTS</span><strong id="ttsMetric">-</strong></div>
-              <div class="detail-item"><span>Duration</span><strong id="callDurationMetric">-</strong></div>
-              <div class="detail-item"><span>Gemini Output</span><strong id="geminiOutputMetric">-</strong></div>
-              <div class="detail-item"><span>Saved Logs</span><strong id="savedLogMetric">-</strong></div>
-              <div class="detail-item"><span>Barge-in Confirmed</span><strong id="bargeInMetric">-</strong></div>
-              <div class="detail-item"><span>Barge-in Blocks</span><strong id="bargeInBlockMetric">-</strong></div>
-              <div class="detail-item"><span>SLO Alerts</span><strong id="sloAlertMetric">-</strong></div>
-              <div class="detail-item"><span>Last SLO Alert</span><strong id="lastSloAlertMetric">-</strong></div>
-              <div class="detail-item"><span>Rollback</span><strong id="rolloutRollbackMetric">-</strong></div>
+        <section class="pane" data-pane="frontend">
+          <div class="pane-tabs">
+            <button type="button" class="tab active" data-pane="frontend" data-tab="conversation">Conversation (Frontend)</button>
+            <button type="button" class="tab" data-pane="frontend" data-tab="logs">System Logs</button>
+            <button type="button" class="tab" data-pane="frontend" data-tab="analytics">Latency Analytics</button>
+          </div>
+
+          <div class="pane-content" data-pane-content="frontend" data-tab-content="conversation">
+            <div id="frontendConversation" class="timeline" role="log" aria-live="polite"></div>
+          </div>
+
+          <div class="pane-content hidden" data-pane-content="frontend" data-tab-content="logs">
+            <pre id="frontendLogs" class="log-view"></pre>
+          </div>
+
+          <div class="pane-content hidden" data-pane-content="frontend" data-tab-content="analytics">
+            <div class="analytics-head" id="frontendAnalyticsSummary"></div>
+            <div class="analytics-table-wrap">
+              <table class="analytics-table">
+                <thead>
+                  <tr>
+                    <th>Event</th>
+                    <th>Count</th>
+                    <th>Latest</th>
+                    <th>Updated</th>
+                  </tr>
+                </thead>
+                <tbody id="frontendAnalyticsTable"></tbody>
+              </table>
             </div>
-          </aside>
+          </div>
         </section>
       </main>
     </div>
 
-    <script type="module" src="/dashboard/latency.js"></script>
+    <script type="module" src="/dashboard/latency.js?v=20260330-1"></script>
   </body>
 </html>

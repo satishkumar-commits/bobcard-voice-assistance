@@ -359,6 +359,28 @@ def enforce_devanagari_hindi_reply(text: str, max_sentences: int = 3) -> str:
     if normalized and not normalized.endswith("।"):
         normalized += "।"
 
+    protected_name_tokens: dict[str, str] = {}
+    name_token_index = 0
+
+    def _protect_names(pattern: re.Pattern[str], value: str) -> str:
+        nonlocal name_token_index
+
+        def replacer(match: re.Match[str]) -> str:
+            nonlocal name_token_index
+            raw_name = " ".join((match.group("name") or "").split()).strip()
+            if not raw_name:
+                return match.group(0)
+            placeholder = f"नामटोकन{name_token_index}"
+            name_token_index += 1
+            protected_name_tokens[placeholder] = raw_name
+            return match.group(0).replace(raw_name, placeholder, 1)
+
+        return pattern.sub(replacer, value)
+
+    # Keep customer names intact in Hindi prompts where names may still be in Latin script.
+    normalized = _protect_names(re.compile(r"(?P<name>[A-Za-z][A-Za-z\s]{0,40})(?=\s+जी)"), normalized)
+    normalized = _protect_names(re.compile(r"(?<=नमस्ते\s)(?P<name>[A-Za-z][A-Za-z\s]{0,40})(?=।|,|$)"), normalized)
+
     if contains_latin(normalized):
         for pattern, replacement in DEVANAGARI_TECHNICAL_REPLACEMENTS:
             normalized = pattern.sub(replacement, normalized)
@@ -366,6 +388,9 @@ def enforce_devanagari_hindi_reply(text: str, max_sentences: int = 3) -> str:
         normalized = re.sub(r"\s+", " ", normalized).strip(" ,;:")
         if normalized and not normalized.endswith("।"):
             normalized += "।"
+
+    for placeholder, raw_name in protected_name_tokens.items():
+        normalized = normalized.replace(placeholder, raw_name)
 
     normalized = re.sub(r"(।\s*){2,}", "। ", normalized).strip(" ,;:")
     if normalized and not normalized.endswith("।"):
