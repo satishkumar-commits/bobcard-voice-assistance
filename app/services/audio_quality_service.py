@@ -2,6 +2,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 
 from app.core.config import Settings
+from app.core.conversation_prompts import is_short_valid_intent
 
 
 def utc_now() -> datetime:
@@ -66,12 +67,20 @@ class AudioQualityService:
     ) -> tuple[CallAudioState, AudioQualityAssessment]:
         state = self.get_state(call_sid)
         cleaned = transcript.strip()
+        short_valid_intent = is_short_valid_intent(cleaned)
         effective_confidence = confidence if confidence is not None else 0.0
-        low_confidence = effective_confidence < self.settings.stt_confidence_threshold
-        no_meaningful_input = not cleaned or not speech_detected
+        low_confidence = effective_confidence < self.settings.stt_confidence_threshold and not short_valid_intent
+        no_meaningful_input = (not cleaned or not speech_detected) and not short_valid_intent
         likely_noisy = no_meaningful_input or low_confidence
 
-        if no_meaningful_input:
+        if short_valid_intent:
+            state.consecutive_unclear_count = 0
+            state.retry_count = 0
+            state.noise_flag = False
+            state.short_response_mode = False
+            state.last_good_transcript_at = utc_now()
+            state.last_reason = "short-valid-intent"
+        elif no_meaningful_input:
             state.empty_input_count += 1
             state.consecutive_unclear_count += 1
             state.retry_count += 1
@@ -103,7 +112,7 @@ class AudioQualityService:
         state.last_quality_label = self._quality_label(state)
 
         assessment = AudioQualityAssessment(
-            transcript_reliable=bool(cleaned) and not low_confidence and speech_detected,
+            transcript_reliable=(bool(cleaned) and not low_confidence and speech_detected) or short_valid_intent,
             likely_noisy=likely_noisy or state.noise_flag,
             retry_recommended=state.consecutive_unclear_count < self.settings.noisy_call_fallback_trigger,
             fallback_recommended=state.fallback_mode,

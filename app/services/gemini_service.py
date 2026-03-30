@@ -1,7 +1,9 @@
 import logging
+import json
 import re
 from dataclasses import dataclass
 from time import perf_counter
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -84,32 +86,14 @@ class GeminiService:
         call_sid: str = "",
     ) -> GeminiReplyDecision:
         preferred_language = normalize_language(language_code)
-        payload = {
-            "system_instruction": {
-                "parts": [{"text": BANKING_SYSTEM_PROMPT}],
-            },
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [
-                        {
-                            "text": build_conversation_prompt(
-                                history=history,
-                                latest_user_text=latest_user_text,
-                                response_mode=response_mode,
-                                preferred_language=preferred_language,
-                                response_style=response_style,
-                                issue_notes=(active_issue_type or "").replace("_", " "),
-                            )
-                        }
-                    ],
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.05,
-                "maxOutputTokens": 96,
-            },
-        }
+        payload = self._build_generate_payload(
+            history=history,
+            latest_user_text=latest_user_text,
+            response_mode=response_mode,
+            preferred_language=preferred_language,
+            response_style=response_style,
+            active_issue_type=active_issue_type,
+        )
         headers = {"x-goog-api-key": self.settings.gemini_api_key}
         request_sent_at = utc_now_iso()
 
@@ -186,6 +170,118 @@ class GeminiService:
             active_issue_type=active_issue_type,
         )
 
+    async def generate_reply_decision_streaming(
+        self,
+        history: list[dict[str, str]],
+        latest_user_text: str,
+        response_mode: str = "normal",
+        language_code: str = "en-IN",
+        response_style: str = "default",
+        active_issue_type: str | None = None,
+        call_sid: str = "",
+        on_text_chunk: Callable[[str], Awaitable[None]] | None = None,
+    ) -> GeminiReplyDecision:
+        preferred_language = normalize_language(language_code)
+        payload = self._build_generate_payload(
+            history=history,
+            latest_user_text=latest_user_text,
+            response_mode=response_mode,
+            preferred_language=preferred_language,
+            response_style=response_style,
+            active_issue_type=active_issue_type,
+        )
+        headers = {"x-goog-api-key": self.settings.gemini_api_key}
+        request_sent_at = utc_now_iso()
+        started_at = perf_counter()
+        prompt_tokens: int | None = None
+        output_tokens: int | None = None
+        total_tokens: int | None = None
+        previous_text = ""
+        chunk_parts: list[str] = []
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.settings.gemini_base_url}/models/{self.settings.gemini_model}:streamGenerateContent?alt=sse",
+                    headers=headers,
+                    json=payload,
+                ) as response:
+                    response.raise_for_status()
+                    async for raw_line in response.aiter_lines():
+                        line = (raw_line or "").strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data_text = line[5:].strip()
+                        if not data_text or data_text == "[DONE]":
+                            continue
+                        try:
+                            event = json.loads(data_text)
+                        except json.JSONDecodeError:
+                            continue
+
+                        event_prompt_tokens, event_output_tokens, event_total_tokens = self._extract_usage_tokens(event)
+                        if event_prompt_tokens is not None:
+                            prompt_tokens = event_prompt_tokens
+                        if event_output_tokens is not None:
+                            output_tokens = event_output_tokens
+                        if event_total_tokens is not None:
+                            total_tokens = event_total_tokens
+
+                        event_text = self._extract_text_from_event(event)
+                        if not event_text:
+                            continue
+
+                        if event_text.startswith(previous_text):
+                            delta = event_text[len(previous_text) :]
+                            previous_text = event_text
+                        else:
+                            delta = event_text
+                            previous_text += event_text
+
+                        if not delta:
+                            continue
+
+                        chunk_parts.append(delta)
+                        if on_text_chunk is not None:
+                            await on_text_chunk(delta)
+
+            response_received_at = utc_now_iso()
+            latency_ms = int((perf_counter() - started_at) * 1000)
+        except httpx.HTTPError as exc:
+            logger.exception("Gemini streaming request failed: %s", exc)
+            return self._fallback_decision(
+                reason="http_error",
+                latest_user_text=latest_user_text,
+                language_code=preferred_language,
+                response_mode=response_mode,
+                response_style=response_style,
+                provider_success=False,
+                active_issue_type=active_issue_type,
+            )
+
+        text = "".join(chunk_parts).strip()
+        self._emit_gemini_latency_event(
+            call_sid=call_sid,
+            request_sent_at=request_sent_at,
+            response_received_at=response_received_at,
+            latency_ms=latency_ms,
+            language=preferred_language,
+            prompt_tokens=prompt_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            output_words=self._count_words(text),
+        )
+
+        return self._normalize_reply(
+            text,
+            preferred_language,
+            latest_user_text,
+            response_mode,
+            response_style,
+            active_issue_type=active_issue_type,
+        )
+
     @staticmethod
     def _extract_usage_tokens(data: dict[str, Any]) -> tuple[int | None, int | None, int | None]:
         usage = data.get("usageMetadata")
@@ -213,6 +309,51 @@ class GeminiService:
         if not cleaned:
             return None
         return len(re.findall(r"\S+", cleaned))
+
+    @staticmethod
+    def _extract_text_from_event(data: dict[str, Any]) -> str:
+        try:
+            parts = data["candidates"][0]["content"]["parts"]
+            return " ".join(part.get("text", "") for part in parts).strip()
+        except (KeyError, IndexError, TypeError, AttributeError):
+            return ""
+
+    @staticmethod
+    def _build_generate_payload(
+        *,
+        history: list[dict[str, str]],
+        latest_user_text: str,
+        response_mode: str,
+        preferred_language: str,
+        response_style: str,
+        active_issue_type: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "system_instruction": {
+                "parts": [{"text": BANKING_SYSTEM_PROMPT}],
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": build_conversation_prompt(
+                                history=history,
+                                latest_user_text=latest_user_text,
+                                response_mode=response_mode,
+                                preferred_language=preferred_language,
+                                response_style=response_style,
+                                issue_notes=(active_issue_type or "").replace("_", " "),
+                            )
+                        }
+                    ],
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.05,
+                "maxOutputTokens": 96,
+            },
+        }
 
     @staticmethod
     def _emit_gemini_latency_event(

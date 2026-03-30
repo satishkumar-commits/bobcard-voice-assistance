@@ -45,6 +45,15 @@ const elements = {
   languageMetric: document.getElementById("languageMetric"),
   outcomeMetric: document.getElementById("outcomeMetric"),
   transcriptEmptyState: document.getElementById("transcriptEmptyState"),
+  sttLatestMetric: document.getElementById("sttLatestMetric"),
+  sttAvgMetric: document.getElementById("sttAvgMetric"),
+  geminiLatestMetric: document.getElementById("geminiLatestMetric"),
+  geminiAvgMetric: document.getElementById("geminiAvgMetric"),
+  ttsLatestMetric: document.getElementById("ttsLatestMetric"),
+  ttsAvgMetric: document.getElementById("ttsAvgMetric"),
+  sttPipelineState: document.getElementById("sttPipelineState"),
+  geminiPipelineState: document.getElementById("geminiPipelineState"),
+  ttsPipelineState: document.getElementById("ttsPipelineState"),
 };
 
 const baseUrl = window.location.origin;
@@ -64,6 +73,8 @@ let conversationActivity = {
   assistantSpeaking: false,
 };
 let activeLanguageCode = "hi-IN";
+let transcriptAutoScrollPinned = true;
+let latencyMetrics = createLatencyMetrics();
 
 const JOURNEY_STAGES = ["requesting", "queued", "connected", "listening", "thinking", "speaking"];
 
@@ -72,6 +83,143 @@ const demoApplicants = [
   { name: "Rajat", phone: "+919910629998", language: "en-IN" },
   { name: "Bhagwati", phone: "+918368532373", language: "hi-IN" },
 ];
+
+function createLatencyMetrics() {
+  return {
+    stt: { count: 0, totalMs: 0, latestMs: null },
+    gemini: { count: 0, totalMs: 0, latestMs: null },
+    tts: { count: 0, totalMs: 0, latestMs: null },
+  };
+}
+
+function getStepBucket(step) {
+  if (step === "sarvam_stt") {
+    return "stt";
+  }
+  if (step === "gemini") {
+    return "gemini";
+  }
+  if (step === "sarvam_tts" || step === "sarvam_tts_cache" || step === "sarvam_tts_first_chunk") {
+    return "tts";
+  }
+  return "";
+}
+
+function setPipelinePill(element, label, status) {
+  if (!element) {
+    return;
+  }
+  element.textContent = label;
+  element.classList.remove("running", "done");
+  if (status) {
+    element.classList.add(status);
+  }
+}
+
+function resetLatencyDashboard() {
+  latencyMetrics = createLatencyMetrics();
+  if (elements.sttLatestMetric) {
+    elements.sttLatestMetric.textContent = "-";
+  }
+  if (elements.sttAvgMetric) {
+    elements.sttAvgMetric.textContent = "Avg -";
+  }
+  if (elements.geminiLatestMetric) {
+    elements.geminiLatestMetric.textContent = "-";
+  }
+  if (elements.geminiAvgMetric) {
+    elements.geminiAvgMetric.textContent = "Avg -";
+  }
+  if (elements.ttsLatestMetric) {
+    elements.ttsLatestMetric.textContent = "-";
+  }
+  if (elements.ttsAvgMetric) {
+    elements.ttsAvgMetric.textContent = "Avg -";
+  }
+  setPipelinePill(elements.sttPipelineState, "STT idle", "");
+  setPipelinePill(elements.geminiPipelineState, "Gemini idle", "");
+  setPipelinePill(elements.ttsPipelineState, "TTS idle", "");
+}
+
+function renderLatencyBucket(bucket) {
+  const metric = latencyMetrics[bucket];
+  if (!metric || metric.latestMs == null) {
+    return;
+  }
+  const avg = Math.round(metric.totalMs / metric.count);
+  if (bucket === "stt") {
+    if (elements.sttLatestMetric) {
+      elements.sttLatestMetric.textContent = `${metric.latestMs} ms`;
+    }
+    if (elements.sttAvgMetric) {
+      elements.sttAvgMetric.textContent = `Avg ${avg} ms`;
+    }
+  } else if (bucket === "gemini") {
+    if (elements.geminiLatestMetric) {
+      elements.geminiLatestMetric.textContent = `${metric.latestMs} ms`;
+    }
+    if (elements.geminiAvgMetric) {
+      elements.geminiAvgMetric.textContent = `Avg ${avg} ms`;
+    }
+  } else if (bucket === "tts") {
+    if (elements.ttsLatestMetric) {
+      elements.ttsLatestMetric.textContent = `${metric.latestMs} ms`;
+    }
+    if (elements.ttsAvgMetric) {
+      elements.ttsAvgMetric.textContent = `Avg ${avg} ms`;
+    }
+  }
+}
+
+function updateLatencyMetrics(event) {
+  if (!event || event.type !== "latency") {
+    return;
+  }
+  if (activeCallSid && event.call_sid && event.call_sid !== activeCallSid) {
+    return;
+  }
+
+  const bucket = getStepBucket(event.step || "");
+  if (!bucket) {
+    return;
+  }
+
+  const latencyMs = typeof event.latency_ms === "number" ? Math.round(event.latency_ms) : null;
+  if (latencyMs != null) {
+    latencyMetrics[bucket].latestMs = latencyMs;
+    latencyMetrics[bucket].count += 1;
+    latencyMetrics[bucket].totalMs += latencyMs;
+    renderLatencyBucket(bucket);
+  }
+
+  if (bucket === "stt") {
+    setPipelinePill(elements.sttPipelineState, "STT done", "done");
+  } else if (bucket === "gemini") {
+    setPipelinePill(elements.geminiPipelineState, "Gemini done", "done");
+  } else if (bucket === "tts") {
+    setPipelinePill(elements.ttsPipelineState, "TTS done", "done");
+  }
+}
+
+function scrollTranscriptToBottom(force = false) {
+  if (!elements.transcriptLog) {
+    return;
+  }
+  if (force || transcriptAutoScrollPinned) {
+    elements.transcriptLog.scrollTop = elements.transcriptLog.scrollHeight;
+  }
+}
+
+function setupTranscriptAutoScrollTracking() {
+  if (!elements.transcriptLog) {
+    return;
+  }
+  elements.transcriptLog.addEventListener("scroll", () => {
+    const nearBottom =
+      elements.transcriptLog.scrollTop + elements.transcriptLog.clientHeight >= elements.transcriptLog.scrollHeight - 80;
+    transcriptAutoScrollPinned = nearBottom;
+  });
+}
 
 function initializeDemoApplicants() {
   if (!elements.demoApplicantSelect) {
@@ -90,17 +238,27 @@ function initializeDemoApplicants() {
       return;
     }
     const applicant = JSON.parse(elements.demoApplicantSelect.value);
-    elements.customerNameInput.value = applicant.name;
-    elements.mobileNumberInput.value = applicant.phone;
-    elements.languageSelect.value = applicant.language;
+    if (elements.customerNameInput) {
+      elements.customerNameInput.value = applicant.name;
+    }
+    if (elements.mobileNumberInput) {
+      elements.mobileNumberInput.value = applicant.phone;
+    }
+    if (elements.languageSelect) {
+      elements.languageSelect.value = applicant.language;
+    }
     appendLog(`Loaded demo applicant ${applicant.name}.`);
   });
 }
 
 async function placeCustomerCall() {
+  if (!elements.mobileNumberInput || !elements.customerNameInput) {
+    appendLog("UI inputs are not ready. Please refresh the dashboard.");
+    return;
+  }
   const mobileNumber = elements.mobileNumberInput.value.trim();
   const customerName = elements.customerNameInput.value.trim();
-  const language = elements.languageSelect.value;
+  const language = elements.languageSelect ? elements.languageSelect.value : "hi-IN";
 
   if (!mobileNumber) {
     appendLog("Enter the customer's mobile number first.");
@@ -417,6 +575,7 @@ function applyCallPhase(phase, status) {
   }
 
   if (phase === "transcribing") {
+    setPipelinePill(elements.sttPipelineState, "STT running", "running");
     setJourneyStage("thinking");
     setConversationBanner("active", "Transcribing the customer's utterance.");
     appendProcess("Transcribing", "Audio was sent to STT and the transcript is being generated.");
@@ -445,6 +604,7 @@ function applyCallPhase(phase, status) {
   }
 
   if (phase === "gemini_requested") {
+    setPipelinePill(elements.geminiPipelineState, "Gemini running", "running");
     setJourneyStage("thinking");
     setConversationBanner("active", "Gemini was requested for this turn.");
     appendProcess("Gemini requested", "The planner selected a Gemini-backed response path.");
@@ -466,6 +626,7 @@ function applyCallPhase(phase, status) {
   }
 
   if (phase === "tts_requested") {
+    setPipelinePill(elements.ttsPipelineState, "TTS running", "running");
     setJourneyStage("thinking");
     setConversationBanner("active", "TTS requested. Preparing the spoken reply.");
     appendProcess("TTS requested", "Speech synthesis was requested for the prepared reply.");
@@ -522,6 +683,9 @@ function applyCallPhase(phase, status) {
   }
 
   if (phase === "session_cleanup") {
+    setPipelinePill(elements.sttPipelineState, "STT idle", "");
+    setPipelinePill(elements.geminiPipelineState, "Gemini idle", "");
+    setPipelinePill(elements.ttsPipelineState, "TTS idle", "");
     setJourneyStage("");
     setConversationBanner("ended", "Session cleanup completed.");
     appendProcess("Session cleanup", "Transient runtime state is being finalized for this call.");
@@ -558,7 +722,7 @@ function showLoader(role, label) {
     </div>
   `;
   elements.transcriptLog.appendChild(row);
-  elements.transcriptLog.scrollTop = elements.transcriptLog.scrollHeight;
+  scrollTranscriptToBottom();
 }
 
 function updateConversationActivity() {
@@ -612,7 +776,7 @@ function renderTranscript(event) {
 
   removeLoader(event.speaker === "assistant" ? "assistant" : "customer");
   elements.transcriptLog.appendChild(row);
-  elements.transcriptLog.scrollTop = elements.transcriptLog.scrollHeight;
+  scrollTranscriptToBottom();
   transcriptCount += 1;
   if (elements.turnsMetric) {
     elements.turnsMetric.textContent = String(transcriptCount);
@@ -702,11 +866,24 @@ function classifyTurn(event) {
 }
 
 function clearTranscript(options = {}) {
-  const { preserveProcess = false, preserveMainPoints = false, preserveResponsePlan = false, preserveGeminiDecision = false, preserveTtsStatus = false, preserveInterruptionStatus = false, preserveCallSummary = false } = options;
+  const {
+    preserveProcess = false,
+    preserveMainPoints = false,
+    preserveResponsePlan = false,
+    preserveGeminiDecision = false,
+    preserveTtsStatus = false,
+    preserveInterruptionStatus = false,
+    preserveCallSummary = false,
+    preserveLatency = false,
+  } = options;
   elements.transcriptLog.innerHTML = "";
+  transcriptAutoScrollPinned = true;
   transcriptCount = 0;
   transcriptKeys = new Set();
   activeCallPhase = "";
+  if (!preserveLatency) {
+    resetLatencyDashboard();
+  }
   if (!preserveProcess) {
     processEntries = [];
     if (elements.processTimeline) {
@@ -724,6 +901,7 @@ function clearTranscript(options = {}) {
   if (elements.transcriptEmptyState) {
     elements.transcriptEmptyState.style.display = "";
   }
+  scrollTranscriptToBottom(true);
   if (!preserveMainPoints) {
     renderMainPoints(null);
   }
@@ -748,7 +926,8 @@ function clearTranscript(options = {}) {
   }
 }
 
-async function loadConversationHistory(callSid) {
+async function loadConversationHistory(callSid, options = {}) {
+  const { preserveLatency = false } = options;
   if (!callSid) {
     return;
   }
@@ -760,7 +939,16 @@ async function loadConversationHistory(callSid) {
   }
 
   const events = await response.json();
-  clearTranscript({ preserveProcess: true, preserveMainPoints: true, preserveResponsePlan: true, preserveGeminiDecision: true, preserveTtsStatus: true, preserveInterruptionStatus: true, preserveCallSummary: true });
+  clearTranscript({
+    preserveProcess: true,
+    preserveMainPoints: true,
+    preserveResponsePlan: true,
+    preserveGeminiDecision: true,
+    preserveTtsStatus: true,
+    preserveInterruptionStatus: true,
+    preserveCallSummary: true,
+    preserveLatency,
+  });
   for (const event of events) {
     renderTranscript(event);
   }
@@ -827,7 +1015,10 @@ function connectRealtime() {
           renderTranscript(transcript);
         }
       } else {
-        loadConversationHistory(event.call_sid);
+        loadConversationHistory(event.call_sid, { preserveLatency: true });
+      }
+      for (const latencyEvent of event.latency_events || []) {
+        updateLatencyMetrics(latencyEvent);
       }
       renderMainPoints(event.call_state?.main_points || null);
       renderResponsePlan(event.call_state?.response_plan || null);
@@ -983,6 +1174,7 @@ function connectRealtime() {
     }
 
     if (event.type === "latency") {
+      updateLatencyMetrics(event);
       return;
     }
 
@@ -1071,6 +1263,8 @@ const webrtcManager = new WebRTCClientManager({
 });
 
 initializeDemoApplicants();
+setupTranscriptAutoScrollTracking();
+resetLatencyDashboard();
 connectRealtime();
 loadRecentCalls();
 if (elements.connectWsButton) {

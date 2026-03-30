@@ -1,4 +1,8 @@
+import asyncio
+import contextlib
 import logging
+import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
@@ -17,6 +21,7 @@ from app.core.issue_guidance import (
     detect_issue_symptom,
     is_opening_response,
     is_simple_acknowledgement,
+    looks_like_general_banking_question,
     looks_like_repair_request,
     looks_like_repeated_acknowledgement,
     normalize_issue_text,
@@ -41,6 +46,7 @@ from app.core.conversation_prompts import (
     SESSION_CLEANUP,
     TRANSCRIBING,
     build_callback_ack,
+    build_application_not_started_reply,
     build_consent_reprompt,
     build_empty_input_reply,
     build_first_unclear_reply,
@@ -50,6 +56,7 @@ from app.core.conversation_prompts import (
     build_identity_reprompt,
     build_identity_verification_prompt,
     build_issue_capture_prompt,
+    build_general_capabilities_reply,
     build_context_setting_prompt,
     build_post_greeting_issue_prompt,
     build_language_preference_reprompt,
@@ -65,11 +72,13 @@ from app.core.conversation_prompts import (
     build_second_unclear_reply,
     build_short_choice_prompt,
     build_sms_link_ack,
+    detect_language_preference,
     detect_auth_confirmation,
     detect_auth_denial,
     detect_escalation_request,
     detect_resolution_choice,
     detect_consent_choice,
+    is_short_valid_intent,
     normalize_language,
     wants_goodbye,
 )
@@ -82,7 +91,14 @@ from app.services.sarvam_stt_service import SarvamSTTService
 from app.services.sarvam_tts_service import SarvamTTSService
 from app.services.twilio_service import TwilioService
 from app.services.vad_service import VADService
-from app.utils.helpers import build_public_url, enforce_devanagari_hindi_reply, sanitize_spoken_text, utc_now_iso
+from app.utils.helpers import (
+    apply_response_style,
+    build_public_url,
+    enforce_devanagari_hindi_reply,
+    infer_language_code,
+    sanitize_spoken_text,
+    utc_now_iso,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -131,6 +147,8 @@ class ConversationService:
         self.issue_resolution_service = issue_resolution_service
         self.realtime_service = realtime_service
         self.max_turns = max_turns
+        self.max_post_resolution_prompts = 1
+        self.max_repeat_suppression = 2
 
     async def upsert_call(
         self,
@@ -299,12 +317,15 @@ class ConversationService:
         reply = await self._handle_transcript_for_call(
             call=call,
             transcript=stt_result.transcript,
+            customer_name=None,
             from_number=from_number,
             audio_bytes=audio_bytes,
             detected_language=stt_result.language_code,
             confidence=stt_result.confidence,
             confidence_source=stt_result.confidence_source,
             speech_detected=stt_result.speech_detected,
+            on_assistant_sentence=None,
+            llm_streaming_enabled=None,
         )
         turn = await self._synthesize_reply(call, reply)
         logger.info(
@@ -331,6 +352,7 @@ class ConversationService:
         *,
         call_sid: str,
         transcript: str,
+        customer_name: str | None = None,
         from_number: str | None,
         to_number: str | None,
         audio_bytes: bytes | None = None,
@@ -338,6 +360,8 @@ class ConversationService:
         confidence: float | None = None,
         confidence_source: str = "unknown",
         speech_detected: bool | None = None,
+        on_assistant_sentence: Callable[[str, str], Awaitable[None]] | None = None,
+        llm_streaming_enabled: bool | None = None,
     ) -> ConversationReply:
         logger.info(
             "Latency step=customer_transcript_received call=%s mode=stream timestamp=%s transcript_preview=%s",
@@ -358,12 +382,15 @@ class ConversationService:
         return await self._handle_transcript_for_call(
             call=call,
             transcript=transcript,
+            customer_name=customer_name,
             from_number=from_number,
             audio_bytes=audio_bytes,
             detected_language=detected_language,
             confidence=confidence,
             confidence_source=confidence_source,
             speech_detected=speech_detected,
+            on_assistant_sentence=on_assistant_sentence,
+            llm_streaming_enabled=llm_streaming_enabled,
         )
 
     async def _handle_transcript_for_call(
@@ -371,30 +398,40 @@ class ConversationService:
         *,
         call: Call,
         transcript: str,
+        customer_name: str | None,
         from_number: str | None,
         audio_bytes: bytes | None,
         detected_language: str | None,
         confidence: float | None,
         confidence_source: str,
         speech_detected: bool | None,
+        on_assistant_sentence: Callable[[str, str], Awaitable[None]] | None,
+        llm_streaming_enabled: bool | None,
     ) -> ConversationReply:
         current_language = self._prompt_language(call)
+        resolved_customer_name = (customer_name or "").strip()
         transcript = sanitize_spoken_text(
             collapse_repeated_acknowledgement(transcript, current_language)
         )
         issue_state = self.issue_resolution_service.get_state(call.call_sid)
-        turn_language = "hi-IN"
-        prompt_language = "hi-IN"
+        turn_language = infer_language_code(
+            transcript,
+            stt_language=detected_language,
+            preferred_language=call.language,
+        )
+        prompt_language = self._prompt_language(call)
         history = await self.get_recent_history(call.id)
         customer_turns = [item for item in history if item["speaker"] == "customer"]
         last_customer_text = customer_turns[-1]["text"] if customer_turns else ""
         consent_choice = detect_consent_choice(transcript)
-        selected_language = None
+        selected_language = detect_language_preference(transcript)
         response_style = "default"
         self.issue_resolution_service.set_response_style(call.call_sid, response_style)
+        low_signal_transcript = self._is_low_signal_transcript(transcript)
 
         if (
             not selected_language
+            and not low_signal_transcript
             and self._should_auto_detect_language(
                 transcript=transcript,
                 customer_turn_count=len(customer_turns),
@@ -407,29 +444,6 @@ class ConversationService:
             await self.session.commit()
             await self._publish_call_status(call)
             prompt_language = self._prompt_language(call)
-
-        early_state_reply = await self._handle_business_state_transition(
-            call=call,
-            transcript=transcript,
-            from_number=from_number,
-            prompt_language=prompt_language,
-            turn_language=turn_language,
-            selected_language=selected_language,
-            consent_choice=consent_choice,
-            issue_state=issue_state,
-            last_customer_text=last_customer_text,
-        )
-        if early_state_reply is not None:
-            return early_state_reply
-
-        if self._looks_like_call_purpose_question(transcript):
-            await self.add_transcript(call, "customer", transcript)
-            self.audio_quality_service.register_success(call.call_sid, transcript)
-            await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
-            self.issue_resolution_service.clear_issue(call.call_sid)
-            await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
-            reply_text = f"{build_process_resume_context_reply(language=prompt_language)} {build_issue_capture_prompt(prompt_language)}"
-            return await self._build_text_turn(call, reply_text, outcome="context-recap")
 
         _, vad_decision = self.vad_service.evaluate_turn(
             call_sid=call.call_sid,
@@ -445,7 +459,37 @@ class ConversationService:
             confidence_source=confidence_source,
             speech_detected=vad_decision.speech_detected,
         )
+        if low_signal_transcript:
+            quality_state.last_reason = "empty-transcript-guard"
+            quality_assessment.transcript_reliable = False
+            quality_assessment.reason = "empty-transcript-guard"
+            emit_latency_event(
+                {
+                    "step": "empty_transcript_guard_applied",
+                    "call_sid": call.call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "transcript_preview": sanitize_spoken_text(transcript)[:80],
+                    "min_chars": max(1, int(self.audio_quality_service.settings.empty_transcript_min_chars)),
+                }
+            )
         await self._publish_audio_quality(call.call_sid, quality_state.as_payload())
+
+        if quality_assessment.transcript_reliable:
+            early_state_reply = await self._handle_business_state_transition(
+                call=call,
+                transcript=transcript,
+                customer_name=resolved_customer_name,
+                from_number=from_number,
+                prompt_language=prompt_language,
+                turn_language=turn_language,
+                selected_language=selected_language,
+                consent_choice=consent_choice,
+                issue_state=issue_state,
+                last_customer_text=last_customer_text,
+            )
+            if early_state_reply is not None:
+                return early_state_reply
+
         main_points = self._build_turn_main_points(
             call=call,
             transcript=transcript,
@@ -478,6 +522,15 @@ class ConversationService:
             quality_assessment=quality_assessment,
             main_points=main_points,
         )
+        logger.info(
+            "Decision call=%s primary_intent=%s route=%s issue_type=%s symptom=%s response_source=%s",
+            call.call_sid,
+            main_points.get("primary_intent"),
+            response_plan.get("route"),
+            response_plan.get("issue_type"),
+            response_plan.get("symptom"),
+            response_plan.get("response_source"),
+        )
         await self._publish_response_plan(call.call_sid, response_plan)
         await self._publish_call_phase(call.call_sid, RESPONSE_PLAN_READY)
 
@@ -490,7 +543,20 @@ class ConversationService:
                 speech_detected=quality_assessment.speech_detected,
             )
 
-        response_language = "hi-IN"
+        if self._looks_like_call_purpose_question(transcript):
+            await self.add_transcript(call, "customer", transcript)
+            self.audio_quality_service.register_success(call.call_sid, transcript)
+            await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
+            self.issue_resolution_service.clear_issue(call.call_sid)
+            await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
+            optional_customer_name = await self._pick_customer_name(call, resolved_customer_name)
+            reply_text = (
+                f"{build_process_resume_context_reply(language=prompt_language)} "
+                f"{build_issue_capture_prompt(prompt_language, name=optional_customer_name)}"
+            )
+            return await self._build_text_turn(call, reply_text, outcome="context-recap")
+
+        response_language = prompt_language
         if call.language != response_language:
             call.language = response_language
             await self.session.commit()
@@ -500,6 +566,7 @@ class ConversationService:
         self.audio_quality_service.register_success(call.call_sid, transcript)
         await self._publish_audio_quality(call.call_sid, quality_state.as_payload())
         await self.add_transcript(call, "customer", transcript)
+        optional_customer_name = await self._pick_customer_name(call, resolved_customer_name)
 
         if response_plan["route"] == "opt_out_close" and from_number:
             await self._record_opt_out(from_number, "caller-requested-opt-out")
@@ -507,23 +574,45 @@ class ConversationService:
             reply_text = build_opt_out_reply(prompt_language)
             return await self._build_text_turn(call, reply_text, should_hangup=True, outcome="opted-out")
 
+        if response_plan["route"] == "application_not_started_close":
+            await self._set_business_state(call.call_sid, CONFIRMATION_CLOSING)
+            reply_text = build_application_not_started_reply(prompt_language)
+            return await self._build_text_turn(call, reply_text, should_hangup=True, outcome="application-not-started")
+
         if issue_state.post_resolution_check_pending:
             resolution_choice = detect_resolution_choice(transcript)
-            if resolution_choice == "no_more_help":
+            if resolution_choice == "no_more_help" or self._looks_like_call_termination_intent(transcript):
                 self.issue_resolution_service.clear_post_resolution_check(call.call_sid)
                 await self._set_business_state(call.call_sid, CONFIRMATION_CLOSING)
                 reply_text = build_resolution_completed_reply(prompt_language)
                 return await self._build_text_turn(call, reply_text, should_hangup=True, outcome="resolution-complete")
-            if resolution_choice == "more_help":
+            if response_plan["route"] == "general_capabilities":
+                self.issue_resolution_service.clear_post_resolution_check(call.call_sid)
+            elif resolution_choice == "more_help":
                 self.issue_resolution_service.clear_post_resolution_check(call.call_sid)
                 if len(normalize_issue_text(transcript).split()) <= 5:
                     await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
-                    return await self._build_text_turn(call, build_issue_capture_prompt(prompt_language), outcome="awaiting-new-issue")
-            else:
+                    return await self._build_text_turn(
+                        call,
+                        build_issue_capture_prompt(prompt_language, name=optional_customer_name),
+                        outcome="awaiting-new-issue",
+                    )
+            elif response_plan["route"] == "resolution_complete_close":
                 self.issue_resolution_service.clear_post_resolution_check(call.call_sid)
+                await self._set_business_state(call.call_sid, CONFIRMATION_CLOSING)
+                reply_text = build_resolution_completed_reply(prompt_language)
+                return await self._build_text_turn(call, reply_text, should_hangup=True, outcome="resolution-complete")
 
         if response_plan["route"] == "resolution_follow_up":
-            self.issue_resolution_service.mark_issue_resolved(call.call_sid)
+            if not issue_state.post_resolution_check_pending:
+                self.issue_resolution_service.mark_issue_resolved(call.call_sid)
+            else:
+                issue_state = self.issue_resolution_service.register_post_resolution_prompt(call.call_sid)
+                if issue_state.post_resolution_prompt_count > self.max_post_resolution_prompts:
+                    self.issue_resolution_service.clear_post_resolution_check(call.call_sid)
+                    await self._set_business_state(call.call_sid, CONFIRMATION_CLOSING)
+                    reply_text = build_resolution_completed_reply(prompt_language)
+                    return await self._build_text_turn(call, reply_text, should_hangup=True, outcome="resolution-complete")
             if response_plan.get("close_after_resolution"):
                 self.issue_resolution_service.clear_post_resolution_check(call.call_sid)
                 await self._set_business_state(call.call_sid, CONFIRMATION_CLOSING)
@@ -547,21 +636,49 @@ class ConversationService:
         customer_turns = [item for item in history if item["speaker"] == "customer"]
         if response_plan["route"] == "post_greeting_issue_capture":
             await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
-            return await self._build_text_turn(call, build_post_greeting_issue_prompt(prompt_language))
+            return await self._build_text_turn(
+                call,
+                build_post_greeting_issue_prompt(prompt_language, name=optional_customer_name),
+            )
 
         if response_plan["route"] == "repair_guidance":
             await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
             if issue_state.issue_type:
                 reply_text = (
                     f"{build_repair_prompt(prompt_language)} "
-                    f"{build_issue_follow_up_question(issue_state.issue_type, prompt_language)}"
+                    f"{build_issue_follow_up_question(issue_state.issue_type, prompt_language, follow_up_count=issue_state.follow_up_count)}"
                 )
             else:
                 reply_text = (
                     f"{build_repair_prompt(prompt_language)} "
-                    f"{build_issue_capture_prompt(prompt_language)}"
+                    f"{build_issue_capture_prompt(prompt_language, name=optional_customer_name)}"
                 )
             return await self._build_text_turn(call, reply_text, outcome="repair-guidance")
+
+        if response_plan["route"] == "short_ack_reprompt":
+            await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
+            if issue_state.issue_type:
+                reply_text = (
+                    "जी, मैं सुन रही हूँ। "
+                    f"{build_issue_follow_up_question(issue_state.issue_type, prompt_language, follow_up_count=issue_state.follow_up_count)}"
+                )
+            else:
+                if prompt_language == "hi-IN":
+                    name_prefix = f"{optional_customer_name} जी, " if optional_customer_name else ""
+                    reply_text = f"{name_prefix}समझ गई। दिक्कत OTP, दस्तावेज़ अपलोड, लॉगिन, या किसी और चरण में है?"
+                else:
+                    reply_text = "I understand. Is the issue with OTP, document upload, login, or something else?"
+            return await self._build_text_turn(call, reply_text, outcome="short-ack-reprompt")
+
+        if response_plan["route"] == "general_capabilities":
+            await self._set_business_state(call.call_sid, RESOLUTION_ACTION)
+            reply_text = build_general_capabilities_reply(prompt_language, response_style=issue_state.response_style)
+            reply_text = self._apply_voice_guardrail(
+                reply_text,
+                language_code=prompt_language,
+                route="general_capabilities",
+            )
+            return await self._build_text_turn(call, reply_text, outcome="general-capabilities")
 
         issue_type = response_plan.get("issue_type") or detect_issue_type(transcript)
         if issue_type:
@@ -580,12 +697,19 @@ class ConversationService:
                         response_style=issue_state.response_style,
                         active_issue_type=issue_type,
                         call_sid=call.call_sid,
+                        on_assistant_sentence=on_assistant_sentence,
+                        llm_streaming_enabled=llm_streaming_enabled,
                     )
                     return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_type}-{symptom}-gemini")
                 return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_type}-{symptom}")
             if response_plan["route"] == "issue_follow_up":
                 await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
-                reply_text = build_issue_follow_up_question(issue_type, prompt_language)
+                issue_state = self.issue_resolution_service.register_follow_up_prompt(call.call_sid)
+                reply_text = build_issue_follow_up_question(
+                    issue_type,
+                    prompt_language,
+                    follow_up_count=issue_state.follow_up_count,
+                )
                 if response_plan.get("use_gemini"):
                     reply_text = await self._generate_gemini_reply(
                         history=history,
@@ -595,6 +719,8 @@ class ConversationService:
                         response_style=issue_state.response_style,
                         active_issue_type=issue_type,
                         call_sid=call.call_sid,
+                        on_assistant_sentence=on_assistant_sentence,
+                        llm_streaming_enabled=llm_streaming_enabled,
                     )
                     return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_type}-gemini")
                 return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_type}")
@@ -608,6 +734,8 @@ class ConversationService:
                     response_style=issue_state.response_style,
                     active_issue_type=issue_type,
                     call_sid=call.call_sid,
+                    on_assistant_sentence=on_assistant_sentence,
+                    llm_streaming_enabled=llm_streaming_enabled,
                 )
                 return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_type}-clarify")
 
@@ -625,6 +753,8 @@ class ConversationService:
                         response_style=issue_state.response_style,
                         active_issue_type=issue_state.issue_type,
                         call_sid=call.call_sid,
+                        on_assistant_sentence=on_assistant_sentence,
+                        llm_streaming_enabled=llm_streaming_enabled,
                     )
                     return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_state.issue_type}-clarify")
                 reply_text = build_issue_resolution_reply(issue_state.issue_type, symptom, prompt_language)
@@ -637,6 +767,8 @@ class ConversationService:
                         response_style=issue_state.response_style,
                         active_issue_type=issue_state.issue_type,
                         call_sid=call.call_sid,
+                        on_assistant_sentence=on_assistant_sentence,
+                        llm_streaming_enabled=llm_streaming_enabled,
                     )
                     return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_state.issue_type}-{symptom}-gemini")
                 return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_state.issue_type}-{symptom}")
@@ -649,8 +781,10 @@ class ConversationService:
                     language_code=prompt_language,
                     response_style=issue_state.response_style,
                     active_issue_type=issue_type,
-                        call_sid=call.call_sid,
-                    )
+                    call_sid=call.call_sid,
+                    on_assistant_sentence=on_assistant_sentence,
+                    llm_streaming_enabled=llm_streaming_enabled,
+                )
                 return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_state.issue_type}-followup")
 
         if response_plan["route"] == "max_turns_handoff":
@@ -689,10 +823,17 @@ class ConversationService:
             response_style=issue_state.response_style,
             active_issue_type=issue_state.issue_type,
             call_sid=call.call_sid,
+            on_assistant_sentence=on_assistant_sentence,
+            llm_streaming_enabled=llm_streaming_enabled,
         )
         noisy_ack = build_noisy_mode_acknowledgement(prompt_language)
         if response_mode == "noisy" and noisy_ack.lower() not in reply_text.lower():
             reply_text = f"{noisy_ack} {reply_text}"
+        reply_text = self._apply_voice_guardrail(
+            reply_text,
+            language_code=prompt_language,
+            route=str(response_plan.get("route") or "gemini_response"),
+        )
         reply = await self._build_text_turn(call, reply_text)
         await self._publish_speaking(call.call_sid, "assistant", False)
         return reply
@@ -702,7 +843,12 @@ class ConversationService:
         transcript = Transcript(call_id=call.id, speaker=speaker, text=cleaned_text)
         self.session.add(transcript)
         await self.session.commit()
-        logger.info("Call %s %s said: %s", call.call_sid, speaker, cleaned_text)
+        logger.info(
+            "Call %s %s transcript stored chars=%s",
+            call.call_sid,
+            speaker,
+            len(cleaned_text),
+        )
         await self._publish_transcript(call, speaker, cleaned_text, transcript.created_at)
 
     async def get_recent_history(self, call_id: int) -> list[dict[str, str]]:
@@ -729,8 +875,18 @@ class ConversationService:
         should_hangup: bool = False,
         outcome: str | None = None,
     ) -> ConversationReply:
-        cleaned_text = enforce_devanagari_hindi_reply(sanitize_spoken_text(text))
-        language_code = "hi-IN"
+        max_spoken_chars = max(80, int(self.gemini_service.settings.assistant_tts_max_chars))
+        language_code = self._prompt_language(call)
+        base_text = sanitize_spoken_text(text, max_length=max_spoken_chars)
+        response_style = self.issue_resolution_service.get_state(call.call_sid).response_style
+        styled_text = apply_response_style(base_text, language_code, response_style)
+        if language_code == "hi-IN":
+            cleaned_text = enforce_devanagari_hindi_reply(styled_text)
+        else:
+            cleaned_text = sanitize_spoken_text(styled_text, max_length=max_spoken_chars)
+        cleaned_text = self._optimize_voice_reply_for_latency(cleaned_text, language_code=language_code, outcome=outcome)
+        cleaned_text = self._normalize_brand_phrase(cleaned_text)
+        cleaned_text = await self._suppress_repetitive_assistant_reply(call, cleaned_text)
         logger.info(
             "Latency step=assistant_text_ready call=%s timestamp=%s language=%s text_preview=%s",
             call.call_sid,
@@ -747,6 +903,14 @@ class ConversationService:
                 "text_preview": cleaned_text[:80],
             }
         )
+        if outcome:
+            logger.info(
+                "Assistant outcome call=%s outcome=%s language=%s text_preview=%s",
+                call.call_sid,
+                outcome,
+                language_code,
+                cleaned_text[:80],
+            )
         await self.add_transcript(call, "assistant", cleaned_text)
         call.language = language_code
         if outcome:
@@ -809,14 +973,24 @@ class ConversationService:
         if transcript.strip():
             await self.add_transcript(call, "customer", transcript)
 
-        if quality_state.fallback_mode:
-            reply = build_noisy_fallback_reply(prompt_language)
-        elif quality_state.consecutive_unclear_count >= self.audio_quality_service.settings.noisy_call_retry_prompt_trigger:
-            reply = build_second_unclear_reply(prompt_language)
-        elif quality_state.consecutive_unclear_count == 1:
-            reply = build_first_unclear_reply(prompt_language)
+        if not transcript.strip():
+            if quality_state.fallback_mode:
+                reply = "आवाज़ साफ़ नहीं आ रही है। कृपया हाँ, नहीं, कॉलबैक, या लिंक बोलिए।"
+            elif quality_state.consecutive_unclear_count >= self.audio_quality_service.settings.noisy_call_retry_prompt_trigger:
+                reply = "आवाज़ साफ़ नहीं आई। कृपया छोटा जवाब दें: हाँ, नहीं, कॉलबैक, या लिंक।"
+            elif quality_state.consecutive_unclear_count == 1:
+                reply = build_empty_input_reply(prompt_language)
+            else:
+                reply = build_first_unclear_reply(prompt_language)
         else:
-            reply = build_empty_input_reply(prompt_language)
+            if quality_state.fallback_mode:
+                reply = build_noisy_fallback_reply(prompt_language)
+            elif quality_state.consecutive_unclear_count >= self.audio_quality_service.settings.noisy_call_retry_prompt_trigger:
+                reply = build_second_unclear_reply(prompt_language)
+            elif quality_state.consecutive_unclear_count == 1:
+                reply = build_first_unclear_reply(prompt_language)
+            else:
+                reply = build_empty_input_reply(prompt_language)
 
         logger.info(
             "Unclear audio for %s confidence=%.2f source=%s speech=%s retry=%s fallback=%s",
@@ -879,6 +1053,7 @@ class ConversationService:
         *,
         call: Call,
         transcript: str,
+        customer_name: str,
         from_number: str | None,
         prompt_language: str,
         turn_language: str,
@@ -888,6 +1063,8 @@ class ConversationService:
         last_customer_text: str,
     ) -> ConversationReply | None:
         business_state = issue_state.business_state
+        forced_customer_name = (customer_name or "").strip()
+        optional_customer_name = await self._pick_customer_name(call, forced_customer_name)
         normalized_transcript = normalize_issue_text(transcript)
         transcript_has_issue = bool(detect_issue_type(transcript) or detect_issue_symptom(transcript))
 
@@ -898,24 +1075,22 @@ class ConversationService:
 
             if self._looks_like_call_purpose_question(transcript):
                 await self._set_business_state(call.call_sid, CONSENT_CHECK)
-                reply_text = f"{build_process_resume_context_reply(language=prompt_language)} {build_consent_reprompt(prompt_language)}"
+                reply_text = (
+                    f"{build_process_resume_context_reply(language=prompt_language)} "
+                    f"{build_consent_reprompt(prompt_language, name=optional_customer_name)}"
+                )
                 return await self._build_text_turn(call, reply_text, outcome="context-recap")
 
             if consent_choice == "granted":
-                if selected_language and call.language != selected_language:
-                    call.language = selected_language
+                if call.language != "hi-IN":
+                    call.language = "hi-IN"
                     await self.session.commit()
                     await self._publish_call_status(call)
-                    prompt_language = self._prompt_language(call)
-                    await self._set_business_state(call.call_sid, IDENTITY_VERIFICATION)
-                    reply_text = (
-                        f"{build_language_selected_reply(language=prompt_language)} "
-                        f"{build_identity_verification_prompt(language=prompt_language)}"
-                    )
-                    return await self._build_text_turn(call, reply_text)
-
-                await self._set_business_state(call.call_sid, LANGUAGE_SELECTION)
-                return await self._build_text_turn(call, build_language_prompt(language=prompt_language))
+                await self._set_business_state(call.call_sid, IDENTITY_VERIFICATION)
+                return await self._build_text_turn(
+                    call,
+                    build_identity_verification_prompt(name=forced_customer_name, language="hi-IN"),
+                )
 
             if consent_choice == "callback":
                 await self._set_business_state(call.call_sid, CONFIRMATION_CLOSING)
@@ -947,7 +1122,10 @@ class ConversationService:
                 )
 
             await self._set_business_state(call.call_sid, CONSENT_CHECK)
-            return await self._build_text_turn(call, build_consent_reprompt(prompt_language))
+            return await self._build_text_turn(
+                call,
+                build_consent_reprompt(prompt_language, name=optional_customer_name),
+            )
 
         if business_state == LANGUAGE_SELECTION:
             await self.add_transcript(call, "customer", transcript)
@@ -962,16 +1140,19 @@ class ConversationService:
             prompt_language = self._prompt_language(call)
 
             if not selected_language and not normalized_transcript:
-                return await self._build_text_turn(call, build_language_preference_reprompt())
+                return await self._build_text_turn(
+                    call,
+                    build_language_preference_reprompt(name=optional_customer_name),
+                )
 
             await self._set_business_state(call.call_sid, IDENTITY_VERIFICATION)
             if selected_language:
                 reply_text = (
                     f"{build_language_selected_reply(language=prompt_language)} "
-                    f"{build_identity_verification_prompt(language=prompt_language)}"
+                    f"{build_identity_verification_prompt(name=forced_customer_name, language=prompt_language)}"
                 )
             else:
-                reply_text = build_identity_verification_prompt(language=prompt_language)
+                reply_text = build_identity_verification_prompt(name=forced_customer_name, language=prompt_language)
             return await self._build_text_turn(call, reply_text)
 
         if business_state == IDENTITY_VERIFICATION:
@@ -982,7 +1163,10 @@ class ConversationService:
             if detect_auth_confirmation(transcript):
                 self.issue_resolution_service.mark_identity_verified(call.call_sid)
                 await self._set_business_state(call.call_sid, CONTEXT_SETTING)
-                return await self._build_text_turn(call, build_context_setting_prompt(language=prompt_language))
+                return await self._build_text_turn(
+                    call,
+                    build_context_setting_prompt(language=prompt_language, name=optional_customer_name),
+                )
 
             if detect_auth_denial(transcript):
                 await self._set_business_state(call.call_sid, CONFIRMATION_CLOSING)
@@ -993,7 +1177,10 @@ class ConversationService:
                     outcome="identity-mismatch",
                 )
 
-            return await self._build_text_turn(call, build_identity_reprompt(language=prompt_language))
+            return await self._build_text_turn(
+                call,
+                build_identity_reprompt(name=optional_customer_name, language=prompt_language),
+            )
 
         if business_state == CONTEXT_SETTING:
             if transcript_has_issue:
@@ -1006,16 +1193,84 @@ class ConversationService:
 
             if self._is_duplicate_short_acknowledgement(transcript, last_customer_text) or is_simple_acknowledgement(transcript):
                 await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
-                return await self._build_text_turn(call, build_issue_capture_prompt(prompt_language))
+                return await self._build_text_turn(
+                    call,
+                    build_issue_capture_prompt(prompt_language, name=optional_customer_name),
+                )
 
             await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
-            return await self._build_text_turn(call, build_post_greeting_issue_prompt(prompt_language))
+            return await self._build_text_turn(
+                call,
+                build_post_greeting_issue_prompt(prompt_language, name=optional_customer_name),
+            )
 
         return None
 
     @staticmethod
     def _wants_to_end_call(text: str) -> bool:
-        return wants_goodbye(text)
+        return wants_goodbye(text) or ConversationService._looks_like_call_termination_intent(text)
+
+    @staticmethod
+    def _looks_like_call_termination_intent(text: str) -> bool:
+        normalized = normalize_issue_text(text)
+        if not normalized:
+            return False
+        hard_end_markers = (
+            "फोन रख दो",
+            "phone rakh do",
+            "call kaat do",
+            "कॉल काट दो",
+            "disconnect",
+            "hang up",
+            "बस फोन रखो",
+        )
+        return any(marker in normalized for marker in hard_end_markers)
+
+    @staticmethod
+    def _looks_like_no_issue_statement(text: str) -> bool:
+        normalized = normalize_issue_text(text)
+        if not normalized:
+            return False
+        markers = (
+            "कोई समस्या नहीं",
+            "समस्या नहीं",
+            "समस्या कुछ नहीं",
+            "कोई दिक्कत नहीं",
+            "दिक्कत नहीं",
+            "problem nahi",
+            "no issue",
+            "no problem",
+        )
+        blockers = ("क्या", "kya", "why", "क्यों")
+        if any(blocker in normalized for blocker in blockers):
+            return False
+        return any(marker in normalized for marker in markers)
+
+    @staticmethod
+    def _looks_like_capability_query(text: str) -> bool:
+        normalized = normalize_issue_text(text)
+        if not normalized:
+            return False
+        markers = (
+            "feature",
+            "features",
+            "fees",
+            "charges",
+            "eligibility",
+            "benefit",
+            "benefits",
+            "card limit",
+            "reward",
+            "फीचर",
+            "फीचर्स",
+            "फीस",
+            "चार्ज",
+            "शुल्क",
+            "पात्रता",
+            "लिमिट",
+            "बेनिफिट",
+        )
+        return any(marker in normalized for marker in markers)
 
     @staticmethod
     def _looks_like_call_purpose_question(text: str) -> bool:
@@ -1104,8 +1359,11 @@ class ConversationService:
             "रिजोल्व",
             "सॉल्व हो गया",
             "कोई दिक्कत नहीं",
+            "कोई दिक्कत ही नहीं",
             "दिक्कत नहीं आ रही",
+            "दिक्कत ही नहीं आ रही",
             "कोई समस्या नहीं",
+            "कोई समस्या ही नहीं",
         )
         completion_markers = (
             "done",
@@ -1247,6 +1505,43 @@ class ConversationService:
         )
 
     @staticmethod
+    def _looks_like_application_not_started(text: str) -> bool:
+        normalized = normalize_issue_text(text)
+        if not normalized:
+            return False
+        markers = (
+            "i did not apply",
+            "i didnt apply",
+            "i did not submit",
+            "never applied",
+            "not applied",
+            "no application",
+            "did not fill form",
+            "didnt fill form",
+            "i have not applied",
+            "main ne apply nahi kiya",
+            "maine apply nahi kiya",
+            "maine apply hi nahi kiya",
+            "application nahi kiya",
+            "application hi nahi kiya",
+            "maine aavedan nahi kiya",
+            "maine aavedan hi nahi kiya",
+            "मैंने आवेदन नहीं किया",
+            "मैंने आवेदन ही नहीं किया",
+            "आवेदन नहीं किया",
+            "आवेदन ही नहीं किया",
+            "मैंने अप्लाई नहीं किया",
+            "मैंने अप्लाई ही नहीं किया",
+            "अप्लाई नहीं किया",
+            "अप्लाई ही नहीं किया",
+            "मैंने फॉर्म नहीं भरा",
+            "मैंने कोई फॉर्म नहीं डाला",
+            "कोई फॉर्म नहीं डाला",
+            "फॉर्म नहीं भरा",
+        )
+        return any(marker in normalized for marker in markers)
+
+    @staticmethod
     def _is_duplicate_short_acknowledgement(current_text: str, previous_text: str) -> bool:
         if not current_text or not previous_text:
             return False
@@ -1255,6 +1550,215 @@ class ConversationService:
         if not (is_simple_acknowledgement(previous_text) or looks_like_repeated_acknowledgement(previous_text)):
             return False
         return normalize_issue_text(current_text) == normalize_issue_text(previous_text)
+
+    async def _pick_customer_name(self, call: Call, customer_name: str, *, force: bool = False) -> str:
+        cleaned_name = (customer_name or "").strip()
+        if not cleaned_name:
+            return ""
+        if force:
+            return cleaned_name
+        history = await self.get_recent_history(call.id)
+        recent_assistant_turns = [
+            item["text"]
+            for item in history[-4:]
+            if item.get("speaker") == "assistant" and item.get("text")
+        ]
+        if any(self._assistant_mentions_name(text, cleaned_name) for text in recent_assistant_turns[-2:]):
+            return ""
+        return cleaned_name
+
+    @staticmethod
+    def _assistant_mentions_name(text: str, customer_name: str) -> bool:
+        normalized_text = normalize_issue_text(text)
+        normalized_name = normalize_issue_text(customer_name)
+        if not normalized_text or not normalized_name:
+            return False
+        if normalized_name in normalized_text:
+            return True
+        name_tokens = [token for token in normalized_name.split() if len(token) >= 2]
+        if len(name_tokens) < 2:
+            return False
+        text_tokens = set(normalized_text.split())
+        return all(token in text_tokens for token in name_tokens[:2])
+
+    def _is_low_signal_transcript(self, transcript: str) -> bool:
+        if is_short_valid_intent(transcript):
+            return False
+        normalized = normalize_issue_text(transcript)
+        meaningful_chars = sum(1 for char in normalized if char.isalnum())
+        min_chars = max(1, int(self.audio_quality_service.settings.empty_transcript_min_chars))
+        return meaningful_chars < min_chars
+
+    @staticmethod
+    def _normalize_brand_phrase(text: str) -> str:
+        normalized = re.sub(r"\bBOBCards\b", "BOB Card", text, flags=re.IGNORECASE)
+        normalized = normalized.replace("बीओबी कार्ड्स", "BOB Card").replace("बीओबी कार्ड", "BOB Card")
+        normalized = normalized.replace("BOB Cards", "BOB Card")
+        return sanitize_spoken_text(normalized)
+
+    async def _suppress_repetitive_assistant_reply(self, call: Call, candidate_text: str) -> str:
+        if not candidate_text.strip():
+            return candidate_text
+
+        history = await self.get_recent_history(call.id)
+        recent_assistant = [item["text"] for item in history if item.get("speaker") == "assistant" and item.get("text")]
+        if not recent_assistant:
+            return candidate_text
+
+        business_state = self.issue_resolution_service.get_state(call.call_sid).business_state
+        if business_state == RESOLUTION_ACTION:
+            return candidate_text
+        guidance_states = {ISSUE_CAPTURE, RESOLUTION_ACTION}
+        suppress_near_duplicate_questions = business_state not in guidance_states
+        recent_window = recent_assistant[-3:]
+        repeated_reference = next(
+            (
+                item
+                for item in reversed(recent_window)
+                if self._is_repeated_assistant_text(candidate_text, item)
+                or (
+                    suppress_near_duplicate_questions
+                    and self._is_near_duplicate_question(candidate_text, item)
+                )
+            ),
+            "",
+        )
+        if repeated_reference:
+            issue_state = self.issue_resolution_service.register_repeat_suppression(call.call_sid)
+            repeat_count = issue_state.repeat_suppression_count
+            if repeat_count > self.max_repeat_suppression and business_state in {ISSUE_CAPTURE, RESOLUTION_ACTION, CONFIRMATION_CLOSING}:
+                replacement = build_resolution_follow_up_prompt(self._prompt_language(call))
+            else:
+                replacement = self._short_reprompt_for_business_state(
+                    business_state,
+                    self._prompt_language(call),
+                    variant_index=repeat_count,
+                )
+            logger.info(
+                "Assistant repeat suppressed for call=%s business_state=%s repeat_count=%s old_preview=%s replacement_preview=%s",
+                call.call_sid,
+                business_state,
+                repeat_count,
+                candidate_text[:80],
+                replacement[:80],
+            )
+            emit_latency_event(
+                {
+                    "step": "assistant_repeat_suppressed",
+                    "call_sid": call.call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "business_state": business_state,
+                    "repeat_count": repeat_count,
+                    "old_preview": candidate_text[:80],
+                    "replacement_preview": replacement[:80],
+                }
+            )
+            return replacement
+        self.issue_resolution_service.clear_repeat_suppression(call.call_sid)
+
+        last_assistant_text = recent_assistant[-1]
+        if last_assistant_text.startswith("नमस्ते") and candidate_text.startswith("नमस्ते"):
+            without_repeat_salutation = re.sub(r"^नमस्ते[।,\s]*", "", candidate_text).strip()
+            if without_repeat_salutation:
+                return without_repeat_salutation
+        return candidate_text
+
+    @staticmethod
+    def _is_repeated_assistant_text(candidate_text: str, reference_text: str) -> bool:
+        if not candidate_text or not reference_text:
+            return False
+        normalized_candidate = normalize_issue_text(candidate_text)
+        normalized_reference = normalize_issue_text(reference_text)
+        if not normalized_candidate or not normalized_reference:
+            return False
+        return (
+            normalized_candidate == normalized_reference
+            or (
+                min(len(normalized_candidate), len(normalized_reference)) >= 18
+                and (
+                    normalized_candidate in normalized_reference
+                    or normalized_reference in normalized_candidate
+                )
+            )
+        )
+
+    @staticmethod
+    def _is_near_duplicate_question(candidate_text: str, reference_text: str) -> bool:
+        if not candidate_text or not reference_text:
+            return False
+        question_markers = ("?", "कृपया", "बताइए", "कहिए", "please", "tell", "say")
+        candidate_norm = normalize_issue_text(candidate_text)
+        reference_norm = normalize_issue_text(reference_text)
+        if not any(marker in candidate_text for marker in question_markers):
+            return False
+        if not any(marker in reference_text for marker in question_markers):
+            return False
+        candidate_tokens = {token for token in re.findall(r"\w+", candidate_norm) if len(token) > 2}
+        reference_tokens = {token for token in re.findall(r"\w+", reference_norm) if len(token) > 2}
+        if min(len(candidate_tokens), len(reference_tokens)) < 4:
+            return False
+        overlap = len(candidate_tokens & reference_tokens) / max(1, min(len(candidate_tokens), len(reference_tokens)))
+        return overlap >= 0.72
+
+    @staticmethod
+    def _short_reprompt_for_business_state(
+        business_state: BusinessState,
+        language: str = "hi-IN",
+        variant_index: int = 0,
+    ) -> str:
+        if language == "en-IN":
+            if business_state in {OPENING, CONSENT_CHECK}:
+                return "Is this a good time for a quick two-minute call?"
+            if business_state == LANGUAGE_SELECTION:
+                return "Please say Hindi or English."
+            if business_state == IDENTITY_VERIFICATION:
+                return "Am I speaking with the correct customer? Please say yes or no."
+            if business_state in {CONTEXT_SETTING, ISSUE_CAPTURE, RESOLUTION_ACTION}:
+                variants = (
+                    "Please share your issue briefly.",
+                    "Please tell me the exact step where you are blocked.",
+                    "Please say what is visible on your screen right now.",
+                )
+                return variants[variant_index % len(variants)]
+            return "Please repeat that briefly once."
+        if business_state in {OPENING, CONSENT_CHECK}:
+            return "क्या अभी दो मिनट बात करना ठीक रहेगा?"
+        if business_state == LANGUAGE_SELECTION:
+            return "कृपया हिंदी या अंग्रेज़ी कहिए।"
+        if business_state == IDENTITY_VERIFICATION:
+            return "क्या मैं सही ग्राहक से बात कर रही हूँ? हाँ या नहीं कहिए।"
+        if business_state in {CONTEXT_SETTING, ISSUE_CAPTURE, RESOLUTION_ACTION}:
+            variants = (
+                "कृपया समस्या संक्षेप में बताइए।",
+                "कृपया बताइए आप किस चरण पर रुके हैं।",
+                "अभी स्क्रीन पर क्या दिख रहा है, वही बताइए।",
+            )
+            return variants[variant_index % len(variants)]
+        return "कृपया एक बार फिर संक्षेप में बताइए।"
+
+    @staticmethod
+    def _optimize_voice_reply_for_latency(text: str, *, language_code: str, outcome: str | None) -> str:
+        cleaned = sanitize_spoken_text(text)
+        if not cleaned:
+            return text
+
+        max_chars = 170
+        if outcome in {"resolution-complete", "issue-resolved", "customer-ended", "general-capabilities"}:
+            max_chars = 125
+
+        sentence_limit = 2
+        if outcome in {"resolution-complete", "issue-resolved", "customer-ended"}:
+            sentence_limit = 1
+
+        sentences = [part.strip() for part in re.split(r"[।.!?]+", cleaned) if part.strip()]
+        if sentences:
+            trimmed = "। ".join(sentences[:sentence_limit]).strip()
+            if language_code == "hi-IN" and trimmed and not trimmed.endswith("।"):
+                trimmed = f"{trimmed}।"
+        else:
+            trimmed = cleaned
+
+        return sanitize_spoken_text(trimmed, max_length=max_chars)
 
     @staticmethod
     def _should_auto_detect_language(
@@ -1365,23 +1869,157 @@ class ConversationService:
         response_style: str,
         active_issue_type: str | None,
         call_sid: str,
+        on_assistant_sentence: Callable[[str, str], Awaitable[None]] | None,
+        llm_streaming_enabled: bool | None = None,
     ) -> str:
         await self._publish_call_phase(call_sid, GEMINI_REQUESTED)
-        decision = await self.gemini_service.generate_reply_decision(
-            history=history,
-            latest_user_text=latest_user_text,
-            response_mode=response_mode,
-            language_code=language_code,
-            response_style=response_style,
-            active_issue_type=active_issue_type,
-            call_sid=call_sid,
-        )
+        stream_buffer = ""
+        streamed_sentence_count = 0
+        last_assistant_text = ""
+        sentence_max_chars = max(80, int(self.gemini_service.settings.assistant_tts_sentence_max_chars))
+        flush_timeout_ms = max(180, int(self.gemini_service.settings.assistant_stream_flush_timeout_ms))
+        partial_min_chars = max(8, int(self.gemini_service.settings.assistant_stream_partial_min_chars))
+        stream_buffer_lock = asyncio.Lock()
+        stream_flush_task: asyncio.Task | None = None
+        for item in reversed(history):
+            if item.get("speaker") == "assistant" and item.get("text"):
+                last_assistant_text = item["text"]
+                break
+
+        async def _emit_sentence(cleaned_sentence: str, reason: str) -> None:
+            nonlocal streamed_sentence_count, last_assistant_text
+            if self._is_repeated_assistant_text(cleaned_sentence, last_assistant_text):
+                emit_latency_event(
+                    {
+                        "step": "assistant_stream_sentence_suppressed",
+                        "call_sid": call_sid,
+                        "event_timestamp": utc_now_iso(),
+                        "reason": f"repeat_vs_last_assistant_{reason}",
+                        "text_preview": cleaned_sentence[:80],
+                    }
+                )
+                return
+            streamed_sentence_count += 1
+            last_assistant_text = cleaned_sentence
+            emit_latency_event(
+                {
+                    "step": "assistant_sentence_ready",
+                    "call_sid": call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "sentence_index": streamed_sentence_count,
+                    "language": language_code,
+                    "text_preview": cleaned_sentence[:80],
+                }
+            )
+            await on_assistant_sentence(cleaned_sentence, language_code)
+
+        async def _flush_partial_buffer(reason: str) -> None:
+            nonlocal stream_buffer
+            async with stream_buffer_lock:
+                partial = sanitize_spoken_text(stream_buffer.strip(), max_length=sentence_max_chars)
+                if not partial:
+                    return
+                if len(normalize_issue_text(partial)) < partial_min_chars:
+                    return
+                stream_buffer = ""
+            if partial[-1] not in {"।", ".", "!", "?"}:
+                partial = f"{partial}{'।' if language_code == 'hi-IN' else '.'}"
+            await _emit_sentence(partial, reason)
+
+        async def _schedule_partial_flush() -> None:
+            await asyncio.sleep(flush_timeout_ms / 1000)
+            await _flush_partial_buffer(reason="timeout")
+
+        async def on_stream_chunk(chunk: str) -> None:
+            nonlocal stream_buffer, stream_flush_task
+            if on_assistant_sentence is None:
+                return
+            if not chunk:
+                return
+            async with stream_buffer_lock:
+                stream_buffer += chunk
+                sentences, stream_buffer = self._extract_completed_sentences(stream_buffer)
+            for sentence in sentences:
+                cleaned_sentence = sanitize_spoken_text(sentence, max_length=sentence_max_chars)
+                if not cleaned_sentence:
+                    continue
+                await _emit_sentence(cleaned_sentence, reason="punct")
+            if stream_flush_task and not stream_flush_task.done():
+                stream_flush_task.cancel()
+            if stream_buffer.strip():
+                stream_flush_task = asyncio.create_task(_schedule_partial_flush())
+            else:
+                stream_flush_task = None
+
+        use_streaming = self.gemini_service.settings.llm_streaming if llm_streaming_enabled is None else llm_streaming_enabled
+        if use_streaming:
+            decision = await self.gemini_service.generate_reply_decision_streaming(
+                history=history,
+                latest_user_text=latest_user_text,
+                response_mode=response_mode,
+                language_code=language_code,
+                response_style=response_style,
+                active_issue_type=active_issue_type,
+                call_sid=call_sid,
+                on_text_chunk=on_stream_chunk if on_assistant_sentence is not None else None,
+            )
+        else:
+            decision = await self.gemini_service.generate_reply_decision(
+                history=history,
+                latest_user_text=latest_user_text,
+                response_mode=response_mode,
+                language_code=language_code,
+                response_style=response_style,
+                active_issue_type=active_issue_type,
+                call_sid=call_sid,
+            )
+
+        if on_assistant_sentence is not None and not decision.used_fallback:
+            if use_streaming:
+                if stream_flush_task and not stream_flush_task.done():
+                    stream_flush_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await stream_flush_task
+                trailing = sanitize_spoken_text(stream_buffer.strip(), max_length=sentence_max_chars)
+                if trailing:
+                    await _emit_sentence(trailing, reason="trailing")
+            else:
+                full_text = sanitize_spoken_text(decision.text, max_length=sentence_max_chars * 3)
+                if full_text:
+                    sentence_parts, remainder = self._extract_completed_sentences(full_text)
+                    if remainder:
+                        sentence_parts.append(remainder)
+                    if not sentence_parts:
+                        sentence_parts = [full_text]
+
+                    for raw_sentence in sentence_parts:
+                        cleaned_sentence = sanitize_spoken_text(raw_sentence, max_length=sentence_max_chars)
+                        if cleaned_sentence:
+                            await _emit_sentence(cleaned_sentence, reason="non_stream")
+
         await self._publish_gemini_decision(call_sid, self._serialize_gemini_decision(decision))
         await self._publish_call_phase(
             call_sid,
             GEMINI_FALLBACK_USED if decision.used_fallback else GEMINI_REPLY_READY,
         )
         return decision.text
+
+    @staticmethod
+    def _extract_completed_sentences(buffer: str) -> tuple[list[str], str]:
+        if not buffer:
+            return [], ""
+        ready: list[str] = []
+        start = 0
+        boundaries = {"।", ".", "?", "!"}
+        for index, char in enumerate(buffer):
+            if char not in boundaries:
+                continue
+            sentence = buffer[start : index + 1].strip()
+            if sentence:
+                ready.append(sentence)
+            start = index + 1
+        remainder = buffer[start:].strip()
+        return ready, remainder
 
     @staticmethod
     def _serialize_gemini_decision(decision: GeminiReplyDecision) -> dict[str, object]:
@@ -1420,6 +2058,8 @@ class ConversationService:
         escalation_requested = detect_escalation_request(transcript)
         goodbye_requested = self._wants_to_end_call(transcript)
         resolution_signal = self._looks_like_issue_resolved(transcript)
+        no_issue_signal = self._looks_like_no_issue_statement(transcript)
+        capability_query = self._looks_like_capability_query(transcript)
         audio_state = self.audio_quality_service.get_state(call.call_sid)
         if consent_choice == "opt_out":
             primary_intent = "opt_out"
@@ -1431,8 +2071,12 @@ class ConversationService:
             primary_intent = "escalation"
         elif goodbye_requested:
             primary_intent = "goodbye"
+        elif no_issue_signal:
+            primary_intent = "resolution_closure"
         elif issue_type and symptom and symptom != "unknown":
             primary_intent = "issue_resolution"
+        elif looks_like_general_banking_question(transcript) or capability_query:
+            primary_intent = "general_banking_query"
         elif issue_type:
             primary_intent = "issue_follow_up"
         elif resolution_signal:
@@ -1463,6 +2107,8 @@ class ConversationService:
             "escalation_requested": escalation_requested,
             "goodbye_requested": goodbye_requested,
             "resolution_signal": resolution_signal,
+            "no_issue_signal": no_issue_signal,
+            "capability_query": capability_query,
             "noisy_call": audio_state.noise_flag,
             "fallback_mode": audio_state.fallback_mode,
         }
@@ -1470,6 +2116,14 @@ class ConversationService:
     def _resolve_issue_type_for_turn(self, transcript: str, active_issue_type: str | None) -> str | None:
         detected_issue_type = detect_issue_type(transcript)
         if detected_issue_type:
+            # Keep specific active issue sticky unless user clearly switches context.
+            if (
+                active_issue_type
+                and active_issue_type not in {"generic_process_help", "document_upload"}
+                and detected_issue_type in {"generic_process_help", "document_upload"}
+                and not self._looks_like_explicit_issue_switch(transcript)
+            ):
+                return active_issue_type
             return detected_issue_type
 
         if not active_issue_type:
@@ -1478,6 +2132,8 @@ class ConversationService:
         normalized = normalize_issue_text(transcript)
         if not normalized:
             return active_issue_type
+        if self._looks_like_no_issue_statement(transcript):
+            return None
         if self._looks_like_call_purpose_question(transcript):
             return None
 
@@ -1499,7 +2155,7 @@ class ConversationService:
         )
         if any(marker in normalized for marker in continuation_markers):
             return active_issue_type
-        if len(normalized.split()) <= 3:
+        if len(normalized.split()) <= 6:
             return active_issue_type
         return None
 
@@ -1528,6 +2184,7 @@ class ConversationService:
         should_hangup = False
         close_after_resolution = False
         use_gemini = False
+        primary_intent = str(main_points.get("primary_intent") or "")
 
         if not quality_assessment.transcript_reliable:
             route = "unclear_audio"
@@ -1551,9 +2208,18 @@ class ConversationService:
             objective = "Honor opt-out request and end the call."
             response_source = "prompt"
             should_hangup = True
+        elif self._looks_like_application_not_started(transcript):
+            route = "application_not_started_close"
+            objective = "Close the call when the customer says no application was started."
+            response_source = "prompt"
+            should_hangup = True
         elif issue_state.post_resolution_check_pending:
             resolution_choice = detect_resolution_choice(transcript)
-            if resolution_choice == "no_more_help":
+            if primary_intent == "general_banking_query":
+                route = "general_capabilities"
+                objective = "Answer product or service information queries with concise options."
+                response_source = "prompt"
+            elif resolution_choice == "no_more_help" or self._looks_like_call_termination_intent(transcript):
                 route = "resolution_complete_close"
                 objective = "Confirm no more help is needed and end the call."
                 response_source = "prompt"
@@ -1562,11 +2228,20 @@ class ConversationService:
                 route = "new_issue_capture"
                 objective = "Start collecting the next issue after resolving the previous one."
                 response_source = "prompt"
+            elif issue_state.post_resolution_prompt_count >= self.max_post_resolution_prompts:
+                route = "resolution_complete_close"
+                objective = "Close politely after a repeated unresolved closure check."
+                response_source = "prompt"
+                should_hangup = True
+            else:
+                route = "resolution_follow_up"
+                objective = "Ask one short closure check and avoid reopening troubleshooting."
+                response_source = "prompt"
         elif self._looks_like_issue_resolved(transcript):
             route = "resolution_follow_up"
             objective = "Confirm the issue is resolved and check whether more help is needed."
             response_source = "prompt"
-            close_after_resolution = self._looks_like_resolution_closure(transcript)
+            close_after_resolution = self._looks_like_resolution_closure(transcript) or self._looks_like_call_termination_intent(transcript)
         elif detect_escalation_request(transcript):
             route = "handoff_close"
             objective = "Acknowledge escalation request and end the automated turn."
@@ -1577,14 +2252,34 @@ class ConversationService:
             objective = "Close the call politely."
             response_source = "prompt"
             should_hangup = True
-        elif (is_opening_response(transcript) or looks_like_repeated_acknowledgement(transcript)) and customer_turn_count <= 2:
-            route = "post_greeting_issue_capture"
-            objective = "Move from acknowledgement into issue capture."
+        elif (
+            is_simple_acknowledgement(transcript)
+            or looks_like_repeated_acknowledgement(transcript)
+            or is_opening_response(transcript)
+        ):
+            route = "short_ack_reprompt"
+            objective = "Acknowledge briefly and ask the customer for the exact blocked step."
             response_source = "prompt"
+            use_gemini = False
         elif looks_like_repair_request(transcript):
             route = "repair_guidance"
             objective = "Repair the conversation by narrowing the issue with a short clarifying prompt."
             response_source = "prompt"
+        elif primary_intent == "general_banking_query":
+            route = "general_capabilities"
+            objective = "Answer product or service information queries with concise options."
+            response_source = "prompt"
+            use_gemini = False
+        elif primary_intent == "general_query" and self._looks_like_capability_query(transcript):
+            route = "general_capabilities"
+            objective = "Answer product capability query directly instead of generic fallback."
+            response_source = "prompt"
+            use_gemini = False
+        elif issue_state.follow_up_count >= 3 and self._looks_like_no_issue_statement(transcript):
+            route = "resolution_follow_up"
+            objective = "Break issue-capture loops when caller says no issue remains."
+            response_source = "prompt"
+            close_after_resolution = True
         elif issue_type:
             if symptom and symptom != "unknown":
                 route = "rule_guidance"
@@ -1651,3 +2346,39 @@ class ConversationService:
     @staticmethod
     def _prompt_language(call: Call) -> str:
         return "hi-IN"
+
+    @staticmethod
+    def _looks_like_explicit_issue_switch(text: str) -> bool:
+        normalized = normalize_issue_text(text)
+        if not normalized:
+            return False
+        switch_markers = (
+            "new issue",
+            "another issue",
+            "different issue",
+            "ab doosra",
+            "ab alag",
+            "अब दूसरा",
+            "अब अलग",
+            "instead",
+        )
+        return any(marker in normalized for marker in switch_markers)
+
+    @staticmethod
+    def _apply_voice_guardrail(text: str, *, language_code: str, route: str) -> str:
+        if normalize_language(language_code) != "hi-IN":
+            return text
+        if route not in {"gemini_response", "general_capabilities"}:
+            return text
+
+        cleaned = sanitize_spoken_text(text, max_length=140).strip()
+        if not cleaned:
+            return text
+
+        sentence_parts = [part.strip() for part in re.split(r"[।.!?]+", cleaned) if part.strip()]
+        if not sentence_parts:
+            return cleaned
+        first_sentence = sentence_parts[0]
+        if not first_sentence.endswith("।"):
+            first_sentence = f"{first_sentence}।"
+        return first_sentence

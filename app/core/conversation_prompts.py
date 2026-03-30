@@ -215,6 +215,12 @@ LANGUAGE_SWITCH_ONLY_BLOCKLIST = [
     "interest", "fees", "charges", "payment", "bill", "due",
 ]
 
+KNOWN_HINDI_NAME_MAP = {
+    "satish": "सतीश",
+    "sateesh": "सतीश",
+    "sathish": "सतीश",
+}
+
 
 def normalize_language(language: str | None) -> str:
     if language in SUPPORTED_VOICE_LANGUAGES:
@@ -235,8 +241,8 @@ def build_opening_greeting(
     if language == "hi-IN":
         salutation = _build_hindi_salutation(clean_name).rstrip("।")
         return (
-            f"{salutation}, मैं {assistant_name} हूँ, बीओबी कार्ड्स की एआई वॉइस सहायक बोल रही हूँ। "
-            "यह कॉल गुणवत्ता के लिए रिकॉर्ड हो रही है और आपकी रुकी हुई बीओबी कार्ड आवेदन प्रक्रिया के बारे में है। "
+            f"{salutation}, मैं {assistant_name} हूँ, BOB Card की एआई वॉइस सहायक बोल रही हूँ। "
+            "आपने credit card के लिए आवेदन किया था, उसी प्रक्रिया को आगे बढ़ाने के लिए कॉल कर रही हूँ। "
             "क्या अभी दो मिनट बात करना ठीक रहेगा?"
         )
 
@@ -279,11 +285,7 @@ def build_consent_reprompt(language: str, name: str = "") -> str:
     clean_name = _normalize_name(name)
     if language == "hi-IN":
         salutation = _build_hindi_salutation(clean_name)
-        return (
-            f"{salutation} अगर अभी busy हैं तो आप तीन options में से चुन सकते हैं: "
-            "callback, SMS link, या do-not-call. "
-            "कृपया हाँ, callback, link, या मना कहिए।"
-        )
+        return f"{salutation} अगर बात कर सकते हैं तो हाँ कहिए। नहीं तो कॉलबैक, लिंक, या मना कहिए।"
     prefix = f"{clean_name}, " if clean_name else ""
     return (
         f"{prefix}if now is not a good time, you can choose callback, SMS link, or do-not-call. "
@@ -320,8 +322,9 @@ def build_language_preference_reprompt(name: str = "") -> str:
 def build_identity_verification_prompt(name: str = "", language: str = "en-IN") -> str:
     clean_name = _normalize_name(name)
     if normalize_language(language) == "hi-IN":
-        if clean_name:
-            return f"क्या मैं {clean_name} ji से बात कर रही हूँ? कृपया हाँ या नहीं कहिए।"
+        hindi_name = _normalize_hindi_name(clean_name)
+        if hindi_name:
+            return f"क्या मैं {hindi_name} जी से बात कर रही हूँ? कृपया हाँ या नहीं कहिए।"
         return "क्या मैं सही ग्राहक से बात कर रही हूँ? कृपया हाँ या नहीं कहिए।"
     if clean_name:
         return f"Am I speaking with {clean_name}? Please say yes or no."
@@ -347,13 +350,10 @@ def build_context_setting_prompt(language: str = "en-IN", name: str = "") -> str
     clean_name = _normalize_name(name)
     if normalize_language(language) == "hi-IN":
         prefix = f"{clean_name} ji, " if clean_name else ""
-        return (
-            f"{prefix}मैं आपकी BOBCards application या banking process में जहाँ step रुक गया था, "
-            "उसी में मदद करने के लिए कॉल कर रही हूँ।"
-        )
+        return f"{prefix}मैं आपकी मदद के लिए हूँ। अभी बताइए किस चरण में दिक्कत आ रही है।"
     prefix = f"{clean_name}, " if clean_name else ""
     return (
-        f"{prefix}I am calling to help with the BOBCards application or banking step "
+        f"{prefix}I am calling to help with the BOB Card application or banking step "
         "where your process got stuck."
     )
 
@@ -371,7 +371,7 @@ def build_post_greeting_issue_prompt(language: str = "en-IN", name: str = "") ->
     clean_name = _normalize_name(name)
     if normalize_language(language) == "hi-IN":
         prefix = f"{clean_name} ji, " if clean_name else ""
-        return f"{prefix}मैं आपके BOB Card application में जहाँ process रुक गया था, उसी में help करती हूँ। अभी किस step पर दिक्कत आ रही है?"
+        return f"{prefix}ठीक है, मैं मदद के लिए हूँ। अभी किस step पर दिक्कत आ रही है?"
     prefix = f"{clean_name}, " if clean_name else ""
     return f"{prefix}I am calling to help with the BOB Card application step where your process got stuck. Which step is giving you trouble right now?"
 
@@ -379,19 +379,19 @@ def build_post_greeting_issue_prompt(language: str = "en-IN", name: str = "") ->
 def build_general_capabilities_reply(language: str = "en-IN", response_style: str = "default") -> str:
     language = normalize_language(language)
     if language == "hi-IN" and response_style == "hinglish":
-        return (
-            "Main BOBCards se judi banking help deti hoon, jaise credit card application, Aadhaar ya PAN upload, OTP, login, statement, invoice, refund, EMI, aur application status. "
-            "Aap jo service samajhna chahte hain, uska naam bol dijiye."
-        )
+        return "Main BOB Card ke features, fees aur eligibility batati hoon; aap kis cheez ki jankari chahte hain?"
     if language == "hi-IN":
-        return (
-            "मैं BOBCards से जुड़ी बैंकिंग मदद देती हूँ, जैसे क्रेडिट कार्ड आवेदन, आधार या पैन अपलोड, ओटीपी, लॉगिन, स्टेटमेंट, इनवॉइस, रिफंड, ईएमआई, और आवेदन की स्थिति। "
-            "आप जिस सेवा के बारे में जानना चाहते हैं, उसका नाम बताइए।"
-        )
+        return "मैं BOB Card के फीचर्स, फीस और पात्रता बता सकती हूँ; आप किस बारे में जानना चाहते हैं?"
     return (
-        "I can help with BOBCards banking journeys such as credit card application, Aadhaar or PAN upload, OTP, login, statement, invoice, refund, EMI, and application status. "
+        "I can help with BOB Card journeys such as application continuation, Aadhaar or PAN upload, OTP, login, statement, invoice, refund, EMI, and application status. "
         "Please tell me which service you want to know about."
     )
+
+
+def build_product_info_follow_up_prompt(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "क्या आप फीस, लाभ, या पात्रता के बारे में जानना चाहते हैं?"
+    return "Do you want details about fees, benefits, or eligibility?"
 
 
 def build_human_handoff_reply(language: str = "en-IN") -> str:
@@ -436,6 +436,12 @@ def build_opt_out_reply(language: str = "en-IN") -> str:
     return "Understood. We will end this automated call now. Thank you."
 
 
+def build_application_not_started_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "समझ गई। अगर आपने BOB Card आवेदन शुरू नहीं किया है, तो मैं यह कॉल यहीं समाप्त करती हूँ। धन्यवाद।"
+    return "Understood. If you have not started a BOB Card application, I will close this call now. Thank you."
+
+
 def build_callback_ack(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
         return "धन्यवाद। मैं बाद में कॉल करने का अनुरोध नोट कर रही हूँ। नमस्ते।"
@@ -462,13 +468,13 @@ def build_goodbye_reply(language: str = "en-IN") -> str:
 
 def build_resolution_completed_reply(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
-        return "बहुत अच्छा, आपकी दिक्कत resolve हो गई। आगे कभी मदद चाहिए तो BOB Card support से फिर बात कर सकते हैं।"
+        return "बहुत अच्छा, आपकी समस्या का समाधान हो गया है। आगे कभी मदद चाहिए तो BOB Card support से फिर बात कर सकते हैं।"
     return "Glad that your issue is resolved. If you need any more help, you can reach BOB Card support again."
 
 
 def build_resolution_follow_up_prompt(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
-        return "ठीक है, यह issue resolve हो गया। क्या आपको किसी और चीज़ में मदद चाहिए?"
+        return "धन्यवाद, आपकी समस्या का समाधान हो गया है। क्या आपको किसी और चीज़ में मदद चाहिए?"
     return "Glad this issue is resolved. Do you need help with anything else?"
 
 
@@ -497,6 +503,18 @@ def detect_resolution_choice(text: str) -> ResolutionChoice:
         "नहीं चाहिए",
         "कोई और मदद नहीं",
         "ठीक है बस",
+        "thank you",
+        "thanks",
+        "thik hai thank you",
+        "theek hai thank you",
+        "थैंक यू",
+        "धन्यवाद",
+        "शुक्रिया",
+        "फोन रख दो",
+        "कॉल काट दो",
+        "कोई समस्या नहीं",
+        "समस्या नहीं",
+        "दिक्कत नहीं",
     )
     if normalized in no_more_help_markers or any(marker in normalized for marker in no_more_help_markers):
         return "no_more_help"
@@ -612,6 +630,23 @@ def detect_auth_denial(text: str) -> bool:
     if not normalized:
         return False
     return any(marker in normalized for marker in AUTH_DENY_KEYWORDS)
+
+
+def is_short_valid_intent(text: str) -> bool:
+    normalized = _normalize_choice_text(text)
+    if not normalized:
+        return False
+
+    if len(normalized.split()) > 5:
+        return False
+
+    if detect_consent_choice(text) != "unknown":
+        return True
+    if detect_auth_confirmation(text) or detect_auth_denial(text):
+        return True
+    if detect_resolution_choice(text) != "unknown":
+        return True
+    return False
 
 
 def build_opted_out_notice(language: str = "en-IN") -> str:
@@ -775,10 +810,129 @@ def _normalize_name(name: str) -> str:
 
 
 def _build_hindi_salutation(name: str) -> str:
-    if not name or _contains_latin_text(name):
+    normalized_name = _normalize_hindi_name(name)
+    if not normalized_name:
         return "नमस्ते।"
-    return f"नमस्ते {name}।"
+    return f"नमस्ते {normalized_name}।"
 
 
 def _build_hindi_ack(name: str) -> str:
-    return f"ठीक है {name}।" if name else "ठीक है।"
+    normalized_name = _normalize_hindi_name(name)
+    return f"ठीक है {normalized_name}।" if normalized_name else "ठीक है।"
+
+
+def _normalize_hindi_name(name: str) -> str:
+    clean_name = _normalize_name(name)
+    if not clean_name:
+        return ""
+    if not _contains_latin_text(clean_name):
+        return clean_name
+    token = clean_name.lower().strip()
+    return KNOWN_HINDI_NAME_MAP.get(token, "")
+
+
+def build_user_context(
+    name: str,
+    language: str,
+    session_data: dict | None = None,
+) -> str:
+    """Build per-call context block for runtime prompt generation."""
+    session_data = session_data or {}
+    turns_count = session_data.get("turns_count", 0)
+    notes = session_data.get("notes", "")
+    authenticated = session_data.get("authenticated", True)
+    style_hint = session_data.get("style_hint", "")
+
+    ctx = "[CALL CONTEXT]\n"
+    ctx += f"Customer Name: {name or 'Unknown'}\n"
+    ctx += f"Current Response Language: {_describe_language(language, style_hint)}\n"
+    if style_hint:
+        ctx += f"Style Hint: {style_hint}\n"
+    ctx += f"Registration Issue: {notes if notes else 'Customer faced an issue during BOB Card registration'}\n"
+    ctx += f"Turn: {turns_count + 1}\n"
+    ctx += f"Identity Confirmed: {'Yes' if authenticated else 'No — confirm identity first before proceeding'}\n"
+    return ctx
+
+
+def build_conversation_prompt(
+    history: list[dict[str, str]],
+    latest_user_text: str,
+    response_mode: str = "normal",
+    preferred_language: str = "en-IN",
+    response_style: str = "default",
+    customer_name: str = "",
+    issue_notes: str = "",
+    authenticated: bool = True,
+) -> str:
+    recent_lines: list[str] = []
+    for item in history[-6:]:
+        speaker = item["speaker"].capitalize()
+        recent_lines.append(f"{speaker}: {item['text']}")
+    recent_lines.append(f"Customer: {latest_user_text}")
+    history_block = "\n".join(recent_lines)
+
+    mode_instruction = (
+        "The line seems noisy, so keep the reply very short and ask only one simple next-step question."
+        if response_mode == "noisy"
+        else "Keep the reply short and natural for live voice playback."
+    )
+    style_hint = _style_hint(preferred_language, response_style)
+    context_block = build_user_context(
+        name=customer_name,
+        language=preferred_language,
+        session_data={
+            "turns_count": len(history),
+            "notes": issue_notes,
+            "authenticated": authenticated,
+            "style_hint": style_hint,
+        },
+    )
+
+    return (
+        "Use the call context and recent conversation below to answer the caller's latest message.\n"
+        f"{mode_instruction}\n"
+        "Reply to the latest user intent only. If interrupted, do not continue the previous thread.\n"
+        "Acknowledge naturally first, then guide the next single step.\n"
+        "Ask only one question at a time.\n"
+        "Use only verified context. Do not fabricate offers, benefits, timelines, or status.\n"
+        "Follow the caller's active language for this turn.\n"
+        f"{style_hint}\n"
+        "Keep brand text exactly as 'BOB Card'.\n"
+        "If escalation or callback is requested, offer it naturally but do not claim internal actions are already completed.\n"
+        "Do not use markdown, labels, bullets, numbering, or long explanations.\n\n"
+        f"{context_block}\n\n"
+        "[RECENT CONVERSATION]\n"
+        f"{history_block}"
+    )
+
+
+def _style_hint(preferred_language: str, response_style: str) -> str:
+    normalized = normalize_language(preferred_language)
+    if normalized == "hi-IN":
+        if response_style == "hinglish":
+            return (
+                "For Hindi/Hinglish callers, reply strictly in Devanagari Hindi only. "
+                "Do not use Roman Hindi. Keep sentences short and natural. "
+                "Use Latin script only when required for: BOB Card, OTP, PAN, Aadhaar, SMS."
+            )
+        return (
+            "Reply strictly in Devanagari Hindi only. "
+            "Do not use Roman Hindi. Keep sentences short and natural. "
+            "Use Latin script only when required for: BOB Card, OTP, PAN, Aadhaar, SMS."
+        )
+    return "Reply in clear English with short natural spoken sentences."
+
+
+def _describe_language(language: str, style_hint: str) -> str:
+    normalized = normalize_language(language)
+    if normalized == "hi-IN":
+        if style_hint:
+            return f"hi-IN/Hinglish caller context. {style_hint} Switch immediately if caller changes language."
+        return (
+            "hi-IN/Hinglish caller context. Reply in Devanagari Hindi only. "
+            "Do not use Roman Hindi. Use Latin script only for: BOB Card, OTP, PAN, Aadhaar, SMS. "
+            "Switch immediately if caller changes language."
+        )
+    if normalized == "en-IN":
+        return "en-IN caller context. Reply in clear English. Switch immediately if caller changes language."
+    return f"{normalized} caller context. Switch immediately if caller changes language."

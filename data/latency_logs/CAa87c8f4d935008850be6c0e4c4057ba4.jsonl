@@ -1,0 +1,2 @@
+{"type": "latency", "timestamp": "2026-03-25T20:56:24.685242+00:00", "step": "twilio_outbound_connect", "call_sid": "CAa8...7ba4", "to_number": "***5407", "request_sent_at": "2026-03-25T20:56:23.370+00:00", "response_received_at": "2026-03-25T20:56:24.683+00:00", "latency_ms": 1313}
+{"type": "latency", "timestamp": "2026-03-25T20:57:35.049137+00:00", "step": "twilio_voice_webhook_received", "call_sid": "CAa8...7ba4", "event_timestamp": "2026-03-25T20:57:35.024+00:00", "status": "in-progress", "from_number": "***0543", "to_number": "***5407"}

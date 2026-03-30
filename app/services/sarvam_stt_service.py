@@ -71,9 +71,11 @@ class SarvamSTTService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._streaming_cooldown_until: dict[str, float] = {}
+        self._streaming_failure_count: dict[str, int] = {}
+        streaming_enabled = self._is_streaming_enabled_by_mode()
         self._streaming_client = (
             AsyncSarvamAI(api_subscription_key=settings.sarvam_api_key)
-            if settings.sarvam_api_key and settings.sarvam_stt_use_streaming and AsyncSarvamAI is not None
+            if settings.sarvam_api_key and streaming_enabled and AsyncSarvamAI is not None
             else None
         )
 
@@ -112,46 +114,13 @@ class SarvamSTTService:
         )
         if not enable_persistent:
             return session
+        if not self._is_streaming_enabled_by_mode():
+            return session
         if self._streaming_client is None:
             return session
         if not self._can_use_streaming(call_sid):
             return session
-
-        request_language = language_code if language_code in {"hi-IN", "en-IN"} else "unknown"
-        try:
-            ws_context = self._streaming_client.speech_to_text_streaming.connect(
-                model=self.settings.sarvam_stt_model,
-                mode=self.settings.sarvam_stt_streaming_mode,
-                language_code=request_language,
-                sample_rate=str(sample_rate),
-                high_vad_sensitivity="true" if self.settings.sarvam_stt_streaming_high_vad_sensitivity else "false",
-            )
-            ws = await ws_context.__aenter__()
-            session.ws_context = ws_context
-            session.ws = ws
-            session.persistent_stream_active = True
-            session.stream_transport = "sarvam-persistent"
-            logger.info("STT persistent stream connected for call=%s language=%s", call_sid, request_language)
-            emit_latency_event(
-                {
-                    "step": "stt_persistent_stream_connected",
-                    "call_sid": call_sid,
-                    "event_timestamp": utc_now_iso(),
-                    "language": request_language,
-                }
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._activate_streaming_cooldown(call_sid)
-            session.stream_error = type(exc).__name__
-            logger.warning("STT persistent stream unavailable for call=%s error=%s", call_sid, exc)
-            emit_latency_event(
-                {
-                    "step": "stt_persistent_stream_failed",
-                    "call_sid": call_sid,
-                    "event_timestamp": utc_now_iso(),
-                    "error_type": type(exc).__name__,
-                }
-            )
+        await self._open_persistent_stream_connection(session, reason="initial_connect")
         return session
 
     async def push_mulaw_frame(
@@ -217,6 +186,9 @@ class SarvamSTTService:
     async def close_stream(self, session: STTChunkStreamSession) -> None:
         self._reset_utterance_buffers(session)
         session.preroll_frames.clear()
+        await self._disconnect_persistent_stream(session)
+
+    async def _disconnect_persistent_stream(self, session: STTChunkStreamSession) -> None:
         ws = session.ws
         ws_context = session.ws_context
         session.ws = None
@@ -231,6 +203,163 @@ class SarvamSTTService:
                 maybe = ws.close()
                 if asyncio.iscoroutine(maybe):
                     await maybe
+
+    async def _open_persistent_stream_connection(
+        self,
+        session: STTChunkStreamSession,
+        *,
+        reason: str,
+    ) -> bool:
+        if self._streaming_client is None:
+            return False
+        if not self._is_streaming_enabled_by_mode():
+            return False
+        if not self._can_use_streaming(session.call_sid):
+            return False
+
+        request_language = session.language_code if session.language_code in {"hi-IN", "en-IN"} else "unknown"
+        configured_attempts = max(1, int(self.settings.stt_stream_retry_max))
+        max_attempts = configured_attempts
+        backoff_seconds = max(0, int(self.settings.stt_stream_backoff_ms)) / 1000
+        last_error: Exception | None = None
+        last_policy: dict[str, Any] | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                ws_context = self._streaming_client.speech_to_text_streaming.connect(
+                    model=self.settings.sarvam_stt_model,
+                    mode=self.settings.sarvam_stt_streaming_mode,
+                    language_code=request_language,
+                    sample_rate=str(session.sample_rate),
+                    high_vad_sensitivity="true" if self.settings.sarvam_stt_streaming_high_vad_sensitivity else "false",
+                )
+                ws = await ws_context.__aenter__()
+                session.ws_context = ws_context
+                session.ws = ws
+                session.persistent_stream_active = True
+                session.stream_transport = "sarvam-persistent"
+                session.stream_error = None
+                self._clear_streaming_failures(session.call_sid)
+                step = "stt_persistent_stream_connected" if reason == "initial_connect" else "stt_persistent_stream_reconnected"
+                logger.info(
+                    "STT persistent stream connected for call=%s language=%s reason=%s attempt=%s",
+                    session.call_sid,
+                    request_language,
+                    reason,
+                    attempt,
+                )
+                emit_latency_event(
+                    {
+                        "step": step,
+                        "call_sid": session.call_sid,
+                        "event_timestamp": utc_now_iso(),
+                        "language": request_language,
+                        "reason": reason,
+                        "attempt": attempt,
+                    }
+                )
+                return True
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                error_meta = self._stream_error_meta(exc)
+                last_policy = self._stream_recovery_policy(error_meta["error_category"])
+                await self._disconnect_persistent_stream(session)
+                if last_policy["activate_cooldown"]:
+                    self._activate_streaming_cooldown(session.call_sid)
+                if not last_policy["retryable"]:
+                    break
+                max_attempts = min(max_attempts, int(last_policy["max_attempts"]))
+                if attempt < max_attempts and backoff_seconds > 0:
+                    await asyncio.sleep(backoff_seconds * attempt)
+
+        error_meta = self._stream_error_meta(last_error)
+        self._register_streaming_failure(
+            session.call_sid,
+            error_category=error_meta["error_category"],
+        )
+        session.stream_error = error_meta["error_type"]
+        failure_step = "stt_persistent_stream_failed" if reason == "initial_connect" else "stt_persistent_stream_reconnect_failed"
+        logger.warning(
+            "STT persistent stream unavailable for call=%s reason=%s attempts=%s error_type=%s error_category=%s detail=%s",
+            session.call_sid,
+            reason,
+            max_attempts,
+            error_meta["error_type"],
+            error_meta["error_category"],
+            error_meta["error_detail"],
+        )
+        emit_latency_event(
+            {
+                "step": failure_step,
+                "call_sid": session.call_sid,
+                "event_timestamp": utc_now_iso(),
+                "error_type": error_meta["error_type"],
+                "error_category": error_meta["error_category"],
+                "error_detail": error_meta["error_detail"],
+                "attempts": max_attempts,
+                "configured_attempts": configured_attempts,
+                "reason": reason,
+                "retryable": (last_policy or {}).get("retryable", True),
+            }
+        )
+        return False
+
+    async def _recover_persistent_stream(
+        self,
+        session: STTChunkStreamSession,
+        *,
+        reason: str,
+        source_error: Exception,
+    ) -> tuple[bool, bool]:
+        if not session.call_sid or self._streaming_client is None:
+            return False, False
+        if not self._is_streaming_enabled_by_mode() or not self._can_use_streaming(session.call_sid):
+            return False, False
+
+        error_meta = self._stream_error_meta(source_error)
+        policy = self._stream_recovery_policy(error_meta["error_category"])
+        if policy["activate_cooldown"]:
+            self._activate_streaming_cooldown(session.call_sid)
+        if not policy["allow_reconnect"]:
+            logger.warning(
+                "Skipping STT persistent stream recovery for call=%s reason=%s due_to_category=%s",
+                session.call_sid,
+                reason,
+                error_meta["error_category"],
+            )
+            emit_latency_event(
+                {
+                    "step": "stt_persistent_stream_reconnect_skipped",
+                    "call_sid": session.call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "reason": reason,
+                    "error_type": error_meta["error_type"],
+                    "error_category": error_meta["error_category"],
+                    "error_detail": error_meta["error_detail"],
+                }
+            )
+            return False, False
+        logger.warning(
+            "Attempting STT persistent stream recovery for call=%s reason=%s error_type=%s error_category=%s detail=%s",
+            session.call_sid,
+            reason,
+            error_meta["error_type"],
+            error_meta["error_category"],
+            error_meta["error_detail"],
+        )
+        emit_latency_event(
+            {
+                "step": "stt_persistent_stream_reconnect_requested",
+                "call_sid": session.call_sid,
+                "event_timestamp": utc_now_iso(),
+                "reason": reason,
+                "error_type": error_meta["error_type"],
+                "error_category": error_meta["error_category"],
+                "error_detail": error_meta["error_detail"],
+            }
+        )
+        await self._disconnect_persistent_stream(session)
+        recovered = await self._open_persistent_stream_connection(session, reason=reason)
+        return True, recovered
 
     async def _flush_pending_chunks(self, session: STTChunkStreamSession) -> None:
         target_bytes = max(1, session.micro_chunk_target_bytes)
@@ -247,14 +376,29 @@ class SarvamSTTService:
                     session.total_streamed_bytes += len(chunk)
 
     async def _stream_chunk_to_persistent(self, session: STTChunkStreamSession, mulaw_chunk: bytes) -> bool:
+        wav_chunk = self._mulaw_to_wav(mulaw_chunk)
+        audio_b64 = base64.b64encode(wav_chunk).decode("utf-8")
         try:
-            wav_chunk = self._mulaw_to_wav(mulaw_chunk)
-            audio_b64 = base64.b64encode(wav_chunk).decode("utf-8")
             if await self._try_ws_transcribe(session, audio_b64):
                 return True
             raise RuntimeError("No supported STT streaming send method found")
         except Exception as exc:  # noqa: BLE001
-            await self._deactivate_persistent_stream(session, exc)
+            attempted_recovery, recovered = await self._recover_persistent_stream(
+                session,
+                reason="chunk_send",
+                source_error=exc,
+            )
+            if recovered:
+                try:
+                    if await self._try_ws_transcribe(session, audio_b64):
+                        return True
+                    raise RuntimeError("No supported STT streaming send method found after reconnect")
+                except Exception as retry_exc:  # noqa: BLE001
+                    await self._deactivate_persistent_stream(session, retry_exc, operation="chunk_send_retry")
+                    return False
+
+            if not attempted_recovery:
+                await self._deactivate_persistent_stream(session, exc, operation="chunk_send")
             return False
 
     async def _try_ws_transcribe(self, session: STTChunkStreamSession, audio_b64: str) -> bool:
@@ -331,7 +475,37 @@ class SarvamSTTService:
                     return self._build_result(data, utterance_mulaw, language_code)
             return None
         except Exception as exc:  # noqa: BLE001
-            await self._deactivate_persistent_stream(session, exc)
+            attempted_recovery, recovered = await self._recover_persistent_stream(
+                session,
+                reason="finalize_utterance",
+                source_error=exc,
+            )
+            if recovered:
+                try:
+                    await self._send_finalize_signal(session)
+                    max_messages = max(1, int(self.settings.stream_stt_persistent_finalize_max_messages))
+                    timeout_s = max(0.2, float(self.settings.stream_stt_persistent_finalize_timeout_seconds))
+                    for _ in range(max_messages):
+                        payload = await self._recv_payload(session, timeout_s=timeout_s)
+                        if not payload:
+                            continue
+                        response_type = str(payload.get("type") or "").lower()
+                        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+                        if response_type == "error":
+                            raise RuntimeError(str(data.get("error") or "Unknown persistent STT error"))
+                        transcript = (
+                            data.get("transcript")
+                            or data.get("text")
+                            or data.get("results", [{}])[0].get("transcript", "")
+                        )
+                        if transcript:
+                            return self._build_result(data, utterance_mulaw, language_code)
+                except Exception as retry_exc:  # noqa: BLE001
+                    await self._deactivate_persistent_stream(session, retry_exc, operation="finalize_utterance_retry")
+                    return None
+
+            if not attempted_recovery:
+                await self._deactivate_persistent_stream(session, exc, operation="finalize_utterance")
             return None
 
     async def _send_finalize_signal(self, session: STTChunkStreamSession) -> None:
@@ -379,23 +553,35 @@ class SarvamSTTService:
             return self._coerce_streaming_payload(raw)
         return {}
 
-    async def _deactivate_persistent_stream(self, session: STTChunkStreamSession, exc: Exception) -> None:
-        session.persistent_stream_active = False
-        session.stream_error = type(exc).__name__
+    async def _deactivate_persistent_stream(
+        self,
+        session: STTChunkStreamSession,
+        exc: Exception,
+        *,
+        operation: str,
+    ) -> None:
+        await self._disconnect_persistent_stream(session)
+        error_meta = self._stream_error_meta(exc)
+        session.stream_error = error_meta["error_type"]
         if session.call_sid:
-            self._activate_streaming_cooldown(session.call_sid)
+            self._record_streaming_failure(session.call_sid)
         logger.warning(
-            "STT persistent stream deactivated for call=%s error_type=%s detail=%r",
+            "STT persistent stream deactivated for call=%s operation=%s error_type=%s error_category=%s detail=%s",
             session.call_sid,
-            type(exc).__name__,
-            exc,
+            operation,
+            error_meta["error_type"],
+            error_meta["error_category"],
+            error_meta["error_detail"],
         )
         emit_latency_event(
             {
                 "step": "stt_persistent_stream_deactivated",
                 "call_sid": session.call_sid,
                 "event_timestamp": utc_now_iso(),
-                "error_type": type(exc).__name__,
+                "operation": operation,
+                "error_type": error_meta["error_type"],
+                "error_category": error_meta["error_category"],
+                "error_detail": error_meta["error_detail"],
             }
         )
 
@@ -425,37 +611,70 @@ class SarvamSTTService:
         content_type: str = "audio/wav",
         language_code: str = "unknown",
         call_sid: str = "",
+        force_rest: bool = False,
     ) -> STTResult:
         sample_rate = self._extract_sample_rate(audio_bytes, content_type)
+        streaming_enabled = self._is_streaming_enabled_by_mode()
         streaming_allowed = self._can_use_streaming(call_sid)
-        if self._streaming_client and content_type == "audio/wav" and streaming_allowed:
-            try:
-                payload = await asyncio.wait_for(
-                    self._transcribe_via_streaming(
-                        audio_bytes=audio_bytes,
-                        sample_rate=sample_rate,
-                        language_code=language_code,
-                        call_sid=call_sid,
-                    ),
-                    timeout=max(2.0, self.settings.sarvam_stt_streaming_total_timeout_seconds),
-                )
-                return self._build_result(payload, audio_bytes, language_code)
-            except Exception as exc:  # pragma: no cover - network/provider fallback
-                self._activate_streaming_cooldown(call_sid)
-                logger.warning(
-                    "Sarvam streaming STT failed, falling back to REST: error_type=%s detail=%r",
-                    type(exc).__name__,
-                    exc,
-                )
-                emit_latency_event(
-                    {
-                        "step": "sarvam_stt_streaming_fallback",
-                        "call_sid": call_sid,
-                        "event_timestamp": utc_now_iso(),
-                        "error_type": type(exc).__name__,
-                    }
-                )
-        elif self._streaming_client and content_type == "audio/wav" and not streaming_allowed:
+        if not force_rest and self._streaming_client and content_type == "audio/wav" and streaming_enabled and streaming_allowed:
+            configured_attempts = max(1, int(self.settings.stt_stream_retry_max))
+            max_attempts = configured_attempts
+            backoff_seconds = max(0, int(self.settings.stt_stream_backoff_ms)) / 1000
+            last_error: Exception | None = None
+            last_policy: dict[str, Any] | None = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    payload = await asyncio.wait_for(
+                        self._transcribe_via_streaming(
+                            audio_bytes=audio_bytes,
+                            sample_rate=sample_rate,
+                            language_code=language_code,
+                            call_sid=call_sid,
+                        ),
+                        timeout=max(2.0, self.settings.sarvam_stt_streaming_total_timeout_seconds),
+                    )
+                    self._clear_streaming_failures(call_sid)
+                    return self._build_result(payload, audio_bytes, language_code)
+                except Exception as exc:  # pragma: no cover - network/provider fallback
+                    last_error = exc
+                    error_meta = self._stream_error_meta(exc)
+                    last_policy = self._stream_recovery_policy(error_meta["error_category"])
+                    if last_policy["activate_cooldown"]:
+                        self._activate_streaming_cooldown(call_sid)
+                    if not last_policy["retryable"]:
+                        break
+                    max_attempts = min(max_attempts, int(last_policy["max_attempts"]))
+                    if attempt < max_attempts and backoff_seconds > 0:
+                        await asyncio.sleep(backoff_seconds * attempt)
+
+            error_meta = self._stream_error_meta(last_error)
+            self._register_streaming_failure(
+                call_sid,
+                error_category=error_meta["error_category"],
+            )
+            logger.warning(
+                "Sarvam streaming STT failed after attempts=%s (configured=%s), falling back to REST: error_type=%s error_category=%s retryable=%s detail=%s",
+                max_attempts,
+                configured_attempts,
+                error_meta["error_type"],
+                error_meta["error_category"],
+                (last_policy or {}).get("retryable", True),
+                error_meta["error_detail"],
+            )
+            emit_latency_event(
+                {
+                    "step": "sarvam_stt_streaming_fallback",
+                    "call_sid": call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "error_type": error_meta["error_type"],
+                    "error_category": error_meta["error_category"],
+                    "error_detail": error_meta["error_detail"],
+                    "attempts": max_attempts,
+                    "configured_attempts": configured_attempts,
+                    "retryable": (last_policy or {}).get("retryable", True),
+                }
+            )
+        elif not force_rest and self._streaming_client and content_type == "audio/wav" and streaming_enabled and not streaming_allowed:
             emit_latency_event(
                 {
                     "step": "sarvam_stt_streaming_skipped",
@@ -475,6 +694,8 @@ class SarvamSTTService:
         return self._build_result(payload, audio_bytes, language_code)
 
     def _can_use_streaming(self, call_sid: str) -> bool:
+        if not self._is_streaming_enabled_by_mode():
+            return False
         if not call_sid:
             return True
         cooldown_until = self._streaming_cooldown_until.get(call_sid)
@@ -485,11 +706,154 @@ class SarvamSTTService:
             return True
         return False
 
+    def _stream_recovery_policy(self, error_category: str) -> dict[str, Any]:
+        configured_attempts = max(1, int(self.settings.stt_stream_retry_max))
+        policy: dict[str, Any] = {
+            "retryable": True,
+            "allow_reconnect": True,
+            "activate_cooldown": False,
+            "max_attempts": configured_attempts,
+        }
+
+        if error_category in {"auth", "payload", "protocol", "provider_4xx"}:
+            policy.update(
+                {
+                    "retryable": False,
+                    "allow_reconnect": False,
+                    "activate_cooldown": True,
+                    "max_attempts": 1,
+                }
+            )
+            return policy
+
+        if error_category == "rate_limit":
+            policy.update(
+                {
+                    "retryable": False,
+                    "allow_reconnect": False,
+                    "activate_cooldown": True,
+                    "max_attempts": 1,
+                }
+            )
+            return policy
+
+        if error_category in {"timeout", "empty_response"}:
+            policy["max_attempts"] = min(configured_attempts, 2)
+            return policy
+
+        if error_category in {"network", "provider_5xx", "provider"}:
+            return policy
+
+        return policy
+
     def _activate_streaming_cooldown(self, call_sid: str) -> None:
         if not call_sid:
             return
         cooldown_seconds = max(1.0, self.settings.sarvam_stt_streaming_cooldown_seconds)
         self._streaming_cooldown_until[call_sid] = monotonic() + cooldown_seconds
+        emit_latency_event(
+            {
+                "step": "sarvam_stt_streaming_cooldown_activated",
+                "call_sid": call_sid,
+                "event_timestamp": utc_now_iso(),
+                "cooldown_seconds": cooldown_seconds,
+            }
+        )
+
+    def _is_streaming_enabled_by_mode(self) -> bool:
+        if self.settings.stt_mode == "rest":
+            return False
+        if self.settings.stt_mode == "streaming":
+            return True
+        return self.settings.sarvam_stt_use_streaming
+
+    def _record_streaming_failure(self, call_sid: str) -> None:
+        if not call_sid:
+            return
+        failures = self._streaming_failure_count.get(call_sid, 0) + 1
+        self._streaming_failure_count[call_sid] = failures
+        breaker_limit = max(1, int(self.settings.stt_stream_cb_fails))
+        emit_latency_event(
+            {
+                "step": "sarvam_stt_streaming_failure",
+                "call_sid": call_sid,
+                "event_timestamp": utc_now_iso(),
+                "failure_count": failures,
+                "breaker_limit": breaker_limit,
+            }
+        )
+        if failures >= breaker_limit:
+            self._activate_streaming_cooldown(call_sid)
+            self._streaming_failure_count.pop(call_sid, None)
+
+    def _register_streaming_failure(self, call_sid: str, *, error_category: str) -> None:
+        if error_category in {"auth", "payload", "protocol", "provider_4xx", "rate_limit"}:
+            self._activate_streaming_cooldown(call_sid)
+            self._streaming_failure_count.pop(call_sid, None)
+            emit_latency_event(
+                {
+                    "step": "sarvam_stt_streaming_failure_hard",
+                    "call_sid": call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "error_category": error_category,
+                }
+            )
+            return
+        self._record_streaming_failure(call_sid)
+
+    def _clear_streaming_failures(self, call_sid: str) -> None:
+        if not call_sid:
+            return
+        self._streaming_failure_count.pop(call_sid, None)
+
+    @staticmethod
+    def _stream_error_meta(exc: Exception | None) -> dict[str, str]:
+        if exc is None:
+            return {
+                "error_type": "UnknownError",
+                "error_category": "unknown",
+                "error_detail": "No error details available",
+            }
+
+        error_type = type(exc).__name__
+        message = " ".join(str(exc).strip().split())
+        if len(message) > 180:
+            message = f"{message[:177]}..."
+        if not message:
+            message = "No error details available"
+
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException)):
+            category = "timeout"
+        elif isinstance(exc, httpx.HTTPStatusError):
+            status_code = exc.response.status_code if exc.response is not None else 0
+            if status_code in {401, 403}:
+                category = "auth"
+            elif status_code == 429:
+                category = "rate_limit"
+            elif 500 <= status_code <= 599:
+                category = "provider_5xx"
+            else:
+                category = "provider_4xx"
+        elif isinstance(exc, (httpx.TransportError, OSError, ConnectionError)):
+            category = "network"
+        elif isinstance(exc, (TypeError, ValueError, KeyError)):
+            category = "payload"
+        else:
+            lower_message = message.lower()
+            if "no transcript" in lower_message:
+                category = "empty_response"
+            elif "unsupported" in lower_message or "no supported" in lower_message:
+                category = "protocol"
+            elif "rate limit" in lower_message:
+                category = "rate_limit"
+            else:
+                category = "provider"
+
+        return {
+            "error_type": error_type,
+            "error_category": category,
+            "error_detail": message,
+        }
 
     async def _transcribe_via_rest(
         self,

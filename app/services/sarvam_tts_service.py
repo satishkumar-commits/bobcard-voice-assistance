@@ -1,13 +1,13 @@
 import asyncio
 import base64
-import json
+import contextlib
 import logging
-from collections.abc import AsyncIterator
 from collections import OrderedDict
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
-
-import httpx
+from typing import Any
 
 from app.core.config import Settings
 from app.services.realtime_service import emit_latency_event
@@ -28,11 +28,20 @@ _TTS_STREAM_INITIAL_TIMEOUT_S = 8.0
 _TTS_STREAM_IDLE_TIMEOUT_S = 2.5
 
 
+@dataclass
+class _PersistentTTSStream:
+    context_manager: Any
+    websocket: Any
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    configured_signature: tuple[str, str] | None = None
+
+
 class SarvamTTSService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._cache: OrderedDict[tuple[str, str, str], bytes] = OrderedDict()
-        self._http_client = httpx.AsyncClient(timeout=60.0)
+        self._persistent_streams: dict[str, _PersistentTTSStream] = {}
+        self._persistent_streams_guard = asyncio.Lock()
         self._streaming_client = (
             AsyncSarvamAI(api_subscription_key=settings.sarvam_api_key)
             if settings.sarvam_api_key and settings.sarvam_tts_use_streaming and AsyncSarvamAI is not None
@@ -41,7 +50,8 @@ class SarvamTTSService:
 
     @property
     def output_audio_codec(self) -> str:
-        return self.settings.sarvam_tts_output_audio_codec.strip().lower() or "mulaw"
+        # Twilio media streams consume 8k mu-law natively; keep passthrough by default.
+        return "mulaw"
 
     def resolve_sample_rate(self, output_audio_codec: str | None = None) -> int:
         codec = (output_audio_codec or self.output_audio_codec).strip().lower() or self.output_audio_codec
@@ -80,36 +90,137 @@ class SarvamTTSService:
                 yield cached_audio
                 return
 
-        if self._streaming_client is not None:
-            streamed_audio = bytearray()
-            try:
-                async for chunk in self._stream_via_websocket(
+        if self._streaming_client is None:
+            raise RuntimeError("Sarvam streaming TTS client is not available")
+
+        streamed_audio = bytearray()
+        try:
+            if self.settings.tts_persistent_ws and call_sid:
+                stream = self._stream_via_persistent_connection(
                     prepared_text=prepared_text,
                     language_code=language_code,
                     call_sid=call_sid,
                     output_audio_codec=resolved_codec,
-                ):
-                    streamed_audio.extend(chunk)
-                    yield chunk
-                if streamed_audio:
-                    if use_cache:
-                        self._cache_put(cache_key, bytes(streamed_audio))
-                    return
-            except Exception as exc:  # pragma: no cover - provider fallback
-                if streamed_audio:
-                    logger.exception("Sarvam streaming TTS failed after audio had already started for call=%s", call_sid)
-                    raise
-                logger.warning("Sarvam streaming TTS failed, falling back to REST: %s", exc)
+                )
+            else:
+                stream = self._stream_via_websocket(
+                    prepared_text=prepared_text,
+                    language_code=language_code,
+                    call_sid=call_sid,
+                    output_audio_codec=resolved_codec,
+                )
+            async for chunk in stream:
+                streamed_audio.extend(chunk)
+                yield chunk
+        except asyncio.CancelledError:
+            if self.settings.tts_persistent_ws and call_sid:
+                await self.reset_call_stream(call_sid, language_code=language_code)
+            raise
+        except Exception:
+            if self.settings.tts_persistent_ws and call_sid:
+                await self.reset_call_stream(call_sid, language_code=language_code)
+            raise
 
-        audio_bytes = await self._synthesize_via_rest(
-            prepared_text=prepared_text,
-            language_code=language_code,
-            call_sid=call_sid,
-            output_audio_codec=resolved_codec,
-        )
+        if not streamed_audio:
+            raise RuntimeError("Sarvam TTS streaming returned no audio chunks")
         if use_cache:
-            self._cache_put(cache_key, audio_bytes)
-        yield audio_bytes
+            self._cache_put(cache_key, bytes(streamed_audio))
+
+    async def open_call_stream(self, call_sid: str, language_code: str) -> bool:
+        normalized_call_sid = (call_sid or "").strip()
+        if not normalized_call_sid or not self.settings.tts_persistent_ws or self._streaming_client is None:
+            return False
+
+        stream = await self._get_or_open_persistent_stream(normalized_call_sid)
+        async with stream.lock:
+            await self._ensure_stream_config(
+                stream,
+                language_code=language_code,
+                output_audio_codec=self.output_audio_codec,
+            )
+        logger.info(
+            "Latency step=sarvam_tts_stream_open call=%s timestamp=%s codec=%s",
+            normalized_call_sid,
+            utc_now_iso(),
+            self.output_audio_codec,
+        )
+        emit_latency_event(
+            {
+                "step": "sarvam_tts_stream_open",
+                "call_sid": normalized_call_sid,
+                "event_timestamp": utc_now_iso(),
+                "codec": self.output_audio_codec,
+            }
+        )
+        return True
+
+    async def close_call_stream(self, call_sid: str) -> None:
+        await self._close_persistent_stream((call_sid or "").strip(), reason="session_closed")
+
+    async def reset_call_stream(self, call_sid: str, language_code: str | None = None) -> None:
+        normalized_call_sid = (call_sid or "").strip()
+        if not normalized_call_sid or not self.settings.tts_persistent_ws:
+            return
+        await self._close_persistent_stream(normalized_call_sid, reason="reset")
+        if language_code:
+            with contextlib.suppress(Exception):
+                await self.open_call_stream(normalized_call_sid, language_code)
+
+    async def _close_persistent_stream(self, call_sid: str, *, reason: str) -> None:
+        if not call_sid:
+            return
+        async with self._persistent_streams_guard:
+            stream = self._persistent_streams.pop(call_sid, None)
+        if stream is None:
+            return
+        with contextlib.suppress(Exception):
+            await stream.context_manager.__aexit__(None, None, None)
+        logger.info(
+            "Latency step=sarvam_tts_stream_close call=%s timestamp=%s reason=%s",
+            call_sid,
+            utc_now_iso(),
+            reason,
+        )
+        emit_latency_event(
+            {
+                "step": "sarvam_tts_stream_close",
+                "call_sid": call_sid,
+                "event_timestamp": utc_now_iso(),
+                "reason": reason,
+            }
+        )
+
+    async def _get_or_open_persistent_stream(self, call_sid: str) -> _PersistentTTSStream:
+        async with self._persistent_streams_guard:
+            existing = self._persistent_streams.get(call_sid)
+            if existing is not None:
+                return existing
+
+            context_manager = self._open_streaming_tts_connection()
+            websocket = await context_manager.__aenter__()
+            stream = _PersistentTTSStream(
+                context_manager=context_manager,
+                websocket=websocket,
+            )
+            self._persistent_streams[call_sid] = stream
+            return stream
+
+    async def _ensure_stream_config(
+        self,
+        stream: _PersistentTTSStream,
+        *,
+        language_code: str,
+        output_audio_codec: str,
+    ) -> None:
+        signature = (language_code, output_audio_codec)
+        if stream.configured_signature == signature:
+            return
+        await self._configure_stream(
+            stream.websocket,
+            language_code=language_code,
+            output_audio_codec=output_audio_codec,
+        )
+        stream.configured_signature = signature
 
     async def synthesize_bytes(
         self,
@@ -145,90 +256,83 @@ class SarvamTTSService:
         logger.info("Sarvam TTS audio saved to %s", output_path)
         return output_path
 
-    def _build_payload(
+    async def _configure_stream(
         self,
-        prepared_text: str,
+        ws: Any,
+        *,
         language_code: str,
         output_audio_codec: str,
-    ) -> dict[str, str | int | float | bool]:
-        payload: dict[str, str | int | float | bool] = {
-            "text": prepared_text,
-            "target_language_code": language_code,
-            "speaker": self._normalized_speaker(self.settings.sarvam_tts_voice),
-            "model": self.settings.sarvam_tts_model,
-            "pace": self._effective_pace(language_code),
-            "speech_sample_rate": self._effective_sample_rate(output_audio_codec),
-            "enable_preprocessing": self.settings.sarvam_tts_enable_preprocessing,
-            "output_audio_codec": output_audio_codec,
-        }
-        return payload
+    ) -> None:
+        normalized_codec = (output_audio_codec or "mulaw").strip().lower()
+        sample_rate = self._effective_sample_rate(normalized_codec)
+        speaker = self._normalized_speaker(self.settings.sarvam_tts_voice)
+        pace = self._effective_pace(language_code)
 
-    async def _synthesize_via_rest(
+        # Sarvam SDK versions differ on naming; try modern (output_format/sample_rate)
+        # and then backward-compatible variants.
+        attempts = [
+            {
+                "target_language_code": language_code,
+                "speaker": speaker,
+                "pace": pace,
+                "min_buffer_size": self.settings.sarvam_tts_streaming_min_buffer_size,
+                "max_chunk_length": self.settings.sarvam_tts_streaming_max_chunk_length,
+                "output_format": normalized_codec,
+                "sample_rate": sample_rate,
+            },
+            {
+                "target_language_code": language_code,
+                "speaker": speaker,
+                "pace": pace,
+                "min_buffer_size": self.settings.sarvam_tts_streaming_min_buffer_size,
+                "max_chunk_length": self.settings.sarvam_tts_streaming_max_chunk_length,
+                "output_audio_codec": normalized_codec,
+                "speech_sample_rate": sample_rate,
+                "output_audio_bitrate": self.settings.sarvam_tts_output_audio_bitrate,
+            },
+            {
+                "target_language_code": language_code,
+                "speaker": speaker,
+                "pace": pace,
+                "output_audio_codec": normalized_codec,
+                "sample_rate": sample_rate,
+            },
+        ]
+        last_error: Exception | None = None
+        for payload in attempts:
+            try:
+                await ws.configure(**payload)
+                return
+            except TypeError as exc:
+                last_error = exc
+                continue
+        if last_error:
+            raise last_error
+        raise RuntimeError("Unable to configure Sarvam TTS streaming websocket")
+
+    async def _stream_via_persistent_connection(
         self,
         *,
         prepared_text: str,
         language_code: str,
         call_sid: str,
         output_audio_codec: str,
-    ) -> bytes:
-        headers = {"api-subscription-key": self.settings.sarvam_api_key}
-        payload = self._build_payload(
-            prepared_text=prepared_text,
-            language_code=language_code,
-            output_audio_codec=output_audio_codec,
-        )
-
-        started_at = perf_counter()
-        request_sent_at = utc_now_iso()
-        response = await self._http_client.post(
-            f"{self.settings.sarvam_base_url}/text-to-speech",
-            headers=headers,
-            json=payload,
-        )
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            error_detail = self._extract_error_detail(response)
-            logger.error(
-                "Sarvam TTS request failed status=%s model=%s speaker=%s detail=%s",
-                response.status_code,
-                payload.get("model"),
-                payload.get("speaker"),
-                error_detail,
+    ) -> AsyncIterator[bytes]:
+        stream = await self._get_or_open_persistent_stream(call_sid)
+        async with stream.lock:
+            await self._ensure_stream_config(
+                stream,
+                language_code=language_code,
+                output_audio_codec=output_audio_codec,
             )
-            raise RuntimeError(f"Sarvam TTS request failed: {error_detail}") from exc
-
-        data = response.json()
-        audio_items = data.get("audios") or []
-        if not audio_items:
-            raise ValueError("Sarvam TTS returned no audio data.")
-
-        audio_bytes = base64.b64decode(audio_items[0])
-        response_received_at = utc_now_iso()
-        latency_ms = int((perf_counter() - started_at) * 1000)
-        logger.info(
-            "Latency step=sarvam_tts call=%s request_sent_at=%s response_received_at=%s latency_ms=%s language=%s transport=rest text_preview=%s",
-            call_sid or "unknown",
-            request_sent_at,
-            response_received_at,
-            latency_ms,
-            language_code,
-            prepared_text[:80],
-        )
-        emit_latency_event(
-            {
-                "step": "sarvam_tts",
-                "call_sid": call_sid,
-                "request_sent_at": request_sent_at,
-                "response_received_at": response_received_at,
-                "latency_ms": latency_ms,
-                "language": language_code,
-                "transport": "rest",
-                "codec": output_audio_codec,
-                "text_preview": prepared_text[:80],
-            }
-        )
-        return audio_bytes
+            async for audio_chunk in self._consume_stream_response(
+                ws=stream.websocket,
+                prepared_text=prepared_text,
+                language_code=language_code,
+                call_sid=call_sid,
+                output_audio_codec=output_audio_codec,
+            ):
+                yield audio_chunk
 
     async def _stream_via_websocket(
         self,
@@ -241,82 +345,97 @@ class SarvamTTSService:
         if self._streaming_client is None:
             raise RuntimeError("Sarvam streaming TTS client is not available")
 
+        async with self._open_streaming_tts_connection() as ws:
+            await self._configure_stream(
+                ws,
+                language_code=language_code,
+                output_audio_codec=output_audio_codec,
+            )
+            async for audio_chunk in self._consume_stream_response(
+                ws=ws,
+                prepared_text=prepared_text,
+                language_code=language_code,
+                call_sid=call_sid,
+                output_audio_codec=output_audio_codec,
+            ):
+                yield audio_chunk
+
+    async def _consume_stream_response(
+        self,
+        *,
+        ws: Any,
+        prepared_text: str,
+        language_code: str,
+        call_sid: str,
+        output_audio_codec: str,
+    ) -> AsyncIterator[bytes]:
         request_sent_at = utc_now_iso()
         started_at = perf_counter()
         first_chunk_sent = False
         total_audio_bytes = 0
         saw_completion_event = False
-        async with self._open_streaming_tts_connection() as ws:
-            await ws.configure(
-                target_language_code=language_code,
-                speaker=self._normalized_speaker(self.settings.sarvam_tts_voice),
-                pace=self._effective_pace(language_code),
-                min_buffer_size=self.settings.sarvam_tts_streaming_min_buffer_size,
-                max_chunk_length=self.settings.sarvam_tts_streaming_max_chunk_length,
-                output_audio_codec=output_audio_codec,
-                output_audio_bitrate=self.settings.sarvam_tts_output_audio_bitrate,
-            )
-            await ws.convert(prepared_text)
-            await ws.flush()
 
-            stream_iterator = ws.__aiter__()
-            while True:
-                timeout_s = _TTS_STREAM_IDLE_TIMEOUT_S if first_chunk_sent else _TTS_STREAM_INITIAL_TIMEOUT_S
-                try:
-                    message = await asyncio.wait_for(anext(stream_iterator), timeout=timeout_s)
-                except StopAsyncIteration:
+        await ws.convert(prepared_text)
+        await ws.flush()
+
+        stream_iterator = ws.__aiter__()
+        while True:
+            timeout_s = _TTS_STREAM_IDLE_TIMEOUT_S if first_chunk_sent else _TTS_STREAM_INITIAL_TIMEOUT_S
+            try:
+                message = await asyncio.wait_for(anext(stream_iterator), timeout=timeout_s)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                if total_audio_bytes > 0:
+                    logger.warning(
+                        "Sarvam TTS stream timed out waiting for completion; closing reply early call=%s codec=%s audio_bytes=%s",
+                        call_sid or "unknown",
+                        output_audio_codec,
+                        total_audio_bytes,
+                    )
                     break
-                except asyncio.TimeoutError:
-                    if total_audio_bytes > 0:
-                        logger.warning(
-                            "Sarvam TTS stream timed out waiting for completion; closing reply early call=%s codec=%s audio_bytes=%s",
-                            call_sid or "unknown",
-                            output_audio_codec,
-                            total_audio_bytes,
-                        )
-                        break
-                    raise RuntimeError("Sarvam TTS streaming timed out before any audio was received")
+                raise RuntimeError("Sarvam TTS streaming timed out before any audio was received")
 
-                audio_chunk = self._extract_stream_audio_chunk(message)
-                if audio_chunk:
-                    total_audio_bytes += len(audio_chunk)
-                    if not first_chunk_sent:
-                        first_chunk_sent = True
-                        first_response_at = utc_now_iso()
-                        first_chunk_latency_ms = int((perf_counter() - started_at) * 1000)
-                        logger.info(
-                            "Latency step=sarvam_tts_first_chunk call=%s request_sent_at=%s first_chunk_at=%s latency_ms=%s language=%s codec=%s chunk_bytes=%s",
-                            call_sid or "unknown",
-                            request_sent_at,
-                            first_response_at,
-                            first_chunk_latency_ms,
-                            language_code,
-                            output_audio_codec,
-                            len(audio_chunk),
-                        )
-                        emit_latency_event(
-                            {
-                                "step": "sarvam_tts_first_chunk",
-                                "call_sid": call_sid,
-                                "request_sent_at": request_sent_at,
-                                "response_received_at": first_response_at,
-                                "latency_ms": first_chunk_latency_ms,
-                                "language": language_code,
-                                "transport": "streaming",
-                                "codec": output_audio_codec,
-                                "chunk_bytes": len(audio_chunk),
-                            }
-                        )
-                    yield audio_chunk
-                    continue
+            audio_chunk = self._extract_stream_audio_chunk(message)
+            if audio_chunk:
+                total_audio_bytes += len(audio_chunk)
+                if not first_chunk_sent:
+                    first_chunk_sent = True
+                    first_response_at = utc_now_iso()
+                    first_chunk_latency_ms = int((perf_counter() - started_at) * 1000)
+                    logger.info(
+                        "Latency step=sarvam_tts_first_chunk call=%s request_sent_at=%s first_chunk_at=%s latency_ms=%s language=%s codec=%s chunk_bytes=%s",
+                        call_sid or "unknown",
+                        request_sent_at,
+                        first_response_at,
+                        first_chunk_latency_ms,
+                        language_code,
+                        output_audio_codec,
+                        len(audio_chunk),
+                    )
+                    emit_latency_event(
+                        {
+                            "step": "sarvam_tts_first_chunk",
+                            "call_sid": call_sid,
+                            "request_sent_at": request_sent_at,
+                            "response_received_at": first_response_at,
+                            "latency_ms": first_chunk_latency_ms,
+                            "language": language_code,
+                            "transport": "streaming",
+                            "codec": output_audio_codec,
+                            "chunk_bytes": len(audio_chunk),
+                        }
+                    )
+                yield audio_chunk
+                continue
 
-                error_detail = self._extract_stream_error_detail(message)
-                if error_detail:
-                    raise RuntimeError(f"Sarvam TTS streaming error: {error_detail}")
+            error_detail = self._extract_stream_error_detail(message)
+            if error_detail:
+                raise RuntimeError(f"Sarvam TTS streaming error: {error_detail}")
 
-                if self._is_stream_completion_message(message):
-                    saw_completion_event = True
-                    break
+            if self._is_stream_completion_message(message):
+                saw_completion_event = True
+                break
 
         if total_audio_bytes <= 0:
             raise RuntimeError("Sarvam TTS streaming returned no audio chunks")
@@ -368,7 +487,8 @@ class SarvamTTSService:
     def _effective_pace(self, language_code: str) -> float:
         base_pace = float(self.settings.sarvam_tts_pace)
         if language_code == "hi-IN":
-            return max(0.96, min(base_pace, 1.05))
+            # Keep Hindi voice slightly faster than neutral to improve call flow clarity.
+            return min(max(base_pace, 1.02), 1.12)
         return base_pace
 
     def _effective_sample_rate(self, output_audio_codec: str) -> int:
@@ -399,9 +519,15 @@ class SarvamTTSService:
             return normalized
 
         replacements = {
+            "ओ टी पी": "ओटीपी",
+            "ओ.टी.पी": "ओटीपी",
+            "O T P": "ओटीपी",
             "OTP": "ओटीपी",
+            "एस एम एस": "एसएमएस",
+            "S M S": "एसएमएस",
             "EMI": "ईएमआई",
             "SMS": "एसएमएस",
+            "यू पी आई": "यूपीआई",
             "app": "ऐप",
             "App": "ऐप",
             "step by step": "एक एक कदम में",
@@ -504,28 +630,6 @@ class SarvamTTSService:
             asyncio.get_running_loop().create_task(cleanup_file())
         except RuntimeError:
             logger.debug("No running event loop to schedule cleanup for %s", output_path)
-
-    @staticmethod
-    def _extract_error_detail(response: httpx.Response) -> str:
-        try:
-            payload = response.json()
-        except json.JSONDecodeError:
-            return response.text.strip() or f"HTTP {response.status_code}"
-
-        if isinstance(payload, dict):
-            error = payload.get("error")
-            if isinstance(error, dict):
-                message = error.get("message")
-                code = error.get("code")
-                if message and code:
-                    return f"{code}: {message}"
-                if message:
-                    return str(message)
-            detail = payload.get("detail")
-            if detail:
-                return str(detail)
-
-        return response.text.strip() or f"HTTP {response.status_code}"
 
     @staticmethod
     def _extract_stream_audio_chunk(message: object) -> bytes | None:

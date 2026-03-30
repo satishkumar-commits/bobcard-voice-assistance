@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -11,6 +12,8 @@ from typing import Any
 from fastapi import WebSocket
 
 from app.core.config import get_settings
+from app.core.logging import sanitize_log_payload
+from app.services.rollout_service import get_rollout_service
 from app.utils.helpers import ensure_directory
 
 
@@ -36,12 +39,16 @@ class ConnectionState:
 
 class RealtimeService:
     def __init__(self, latency_log_dir: Path | None = None) -> None:
+        self._settings = get_settings()
+        self._rollout_service = get_rollout_service()
         self._connections: dict[int, ConnectionState] = {}
         self._call_state: dict[str, dict[str, Any]] = {}
         self._transcript_history: dict[str, list[dict[str, Any]]] = {}
         self._latency_history: dict[str, list[dict[str, Any]]] = {}
         self._global_latency_history: list[dict[str, Any]] = []
         self._speaking_state: dict[str, dict[str, bool]] = {}
+        self._slo_windows: dict[str, dict[str, list[float]]] = {}
+        self._slo_alert_last_emit: dict[str, float] = {}
         self._latency_log_dir = latency_log_dir or Path("data/latency_logs")
         ensure_directory(self._latency_log_dir)
         self._lock = asyncio.Lock()
@@ -371,6 +378,7 @@ class RealtimeService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to persist latency event: %s", exc)
 
+        await self._evaluate_slo_for_latency_event(latency_event)
         await self.broadcast_global_event(latency_event)
 
     async def load_persisted_latency_events(self, call_sid: str, limit: int = 500) -> list[dict[str, Any]]:
@@ -488,8 +496,9 @@ class RealtimeService:
     def _append_latency_log(self, latency_event: dict[str, Any]) -> None:
         call_sid = latency_event.get("call_sid")
         log_path = self._latency_log_path(call_sid if isinstance(call_sid, str) else None)
+        sanitized_event = sanitize_log_payload(latency_event)
         with log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(latency_event, ensure_ascii=True) + "\n")
+            handle.write(json.dumps(sanitized_event, ensure_ascii=True) + "\n")
 
     def _read_persisted_latency_events(self, call_sid: str, limit: int) -> list[dict[str, Any]]:
         log_path = self._latency_log_path(call_sid)
@@ -507,6 +516,7 @@ class RealtimeService:
                 except json.JSONDecodeError:
                     continue
                 if isinstance(payload, dict):
+                    payload["call_sid"] = call_sid
                     events.append(payload)
         return events[-limit:]
 
@@ -547,6 +557,131 @@ class RealtimeService:
             if ended_at:
                 return
             await asyncio.sleep(1)
+
+    async def _evaluate_slo_for_latency_event(self, latency_event: dict[str, Any]) -> None:
+        if not self._settings.slo_alerts_enabled:
+            return
+
+        step = str(latency_event.get("step") or "")
+        latency_value = latency_event.get("latency_ms")
+        if not isinstance(latency_value, (int, float)):
+            return
+
+        metric_key, threshold_ms = self._slo_metric_for_step(step)
+        if not metric_key or threshold_ms <= 0:
+            return
+
+        call_sid = str(latency_event.get("call_sid") or "global")
+        call_windows = self._slo_windows.setdefault(call_sid, {})
+        samples = call_windows.setdefault(metric_key, [])
+        samples.append(float(latency_value))
+        window_size = max(5, int(self._settings.slo_window_size))
+        if len(samples) > window_size:
+            del samples[0 : len(samples) - window_size]
+
+        if float(latency_value) > threshold_ms:
+            await self._emit_slo_alert(
+                call_sid=call_sid,
+                metric=metric_key,
+                threshold_ms=threshold_ms,
+                observed_ms=float(latency_value),
+                breach_type="single",
+                step=step,
+                sample_count=len(samples),
+            )
+
+        if len(samples) >= 5:
+            p95_ms = self._percentile(samples, 0.95)
+            if p95_ms > threshold_ms:
+                await self._emit_slo_alert(
+                    call_sid=call_sid,
+                    metric=metric_key,
+                    threshold_ms=threshold_ms,
+                    observed_ms=p95_ms,
+                    breach_type="p95_window",
+                    step=step,
+                    sample_count=len(samples),
+                )
+
+    def _slo_metric_for_step(self, step: str) -> tuple[str | None, int]:
+        if step == "sarvam_stt":
+            return "stt_latency", int(self._settings.slo_stt_latency_ms)
+        if step == "gemini":
+            return "gemini_latency", int(self._settings.slo_gemini_latency_ms)
+        if step in {"sarvam_tts", "sarvam_tts_cache"}:
+            return "tts_latency", int(self._settings.slo_tts_latency_ms)
+        return None, 0
+
+    async def _emit_slo_alert(
+        self,
+        *,
+        call_sid: str,
+        metric: str,
+        threshold_ms: int,
+        observed_ms: float,
+        breach_type: str,
+        step: str,
+        sample_count: int,
+    ) -> None:
+        cooldown_seconds = max(1, int(self._settings.slo_alert_cooldown_seconds))
+        throttle_key = f"{call_sid}:{metric}:{breach_type}"
+        now = utc_now().timestamp()
+        last_emit = self._slo_alert_last_emit.get(throttle_key, 0.0)
+        if now - last_emit < cooldown_seconds:
+            return
+        self._slo_alert_last_emit[throttle_key] = now
+
+        rounded_observed_ms = int(round(observed_ms))
+        severity = "critical" if rounded_observed_ms >= int(threshold_ms * 1.5) else "warning"
+        alert_event = {
+            "type": "slo_alert",
+            "timestamp": utc_now().isoformat(),
+            "call_sid": call_sid,
+            "metric": metric,
+            "step": step,
+            "breach_type": breach_type,
+            "threshold_ms": threshold_ms,
+            "observed_ms": rounded_observed_ms,
+            "sample_count": sample_count,
+            "severity": severity,
+        }
+
+        snapshot = self._call_state.setdefault(call_sid, {})
+        metrics = snapshot.setdefault("metrics", {})
+        metrics["slo_alerts"] = int(metrics.get("slo_alerts", 0)) + 1
+        snapshot["last_slo_alert"] = alert_event
+        snapshot["updated_at"] = utc_now().isoformat()
+
+        try:
+            await asyncio.to_thread(self._append_latency_log, alert_event)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to persist SLO alert event: %s", exc)
+
+        await self.broadcast_global_event(alert_event)
+        rollback_activated = self._rollout_service.record_slo_alert(alert_event)
+        if rollback_activated:
+            rollback_event = {
+                "type": "rollout_rollback",
+                "timestamp": utc_now().isoformat(),
+                "call_sid": call_sid,
+                "reason": "critical_slo_alert_threshold",
+                "rollback_until": self._rollout_service.rollback_until_iso(),
+                "severity": "critical",
+            }
+            try:
+                await asyncio.to_thread(self._append_latency_log, rollback_event)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist rollout rollback event: %s", exc)
+            await self.broadcast_global_event(rollback_event)
+
+    @staticmethod
+    def _percentile(samples: list[float], ratio: float) -> float:
+        if not samples:
+            return 0.0
+        bounded_ratio = min(max(ratio, 0.0), 1.0)
+        ordered = sorted(samples)
+        rank = max(0, min(len(ordered) - 1, math.ceil(bounded_ratio * len(ordered)) - 1))
+        return float(ordered[rank])
 
 
 _realtime_service = RealtimeService(latency_log_dir=get_settings().latency_logs_path)

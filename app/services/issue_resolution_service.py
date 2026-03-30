@@ -14,6 +14,8 @@ class IssueResolutionState:
     response_style: str = "default"
     post_resolution_check_pending: bool = False
     identity_verified: bool = False
+    post_resolution_prompt_count: int = 0
+    repeat_suppression_count: int = 0
 
 
 class IssueResolutionService:
@@ -36,12 +38,20 @@ class IssueResolutionService:
             state.issue_type = issue_type
             state.symptom = None
             state.follow_up_count = 0
+            state.repeat_suppression_count = 0
         state.post_resolution_check_pending = False
+        state.post_resolution_prompt_count = 0
         return state
 
     def register_symptom(self, call_sid: str, symptom: IssueSymptom) -> IssueResolutionState:
         state = self.get_state(call_sid)
         state.symptom = symptom
+        state.follow_up_count += 1
+        state.post_resolution_check_pending = False
+        return state
+
+    def register_follow_up_prompt(self, call_sid: str) -> IssueResolutionState:
+        state = self.get_state(call_sid)
         state.follow_up_count += 1
         state.post_resolution_check_pending = False
         return state
@@ -63,11 +73,14 @@ class IssueResolutionService:
         state.symptom = None
         state.follow_up_count = 0
         state.post_resolution_check_pending = True
+        state.post_resolution_prompt_count = 0
+        state.repeat_suppression_count = 0
         return state
 
     def clear_post_resolution_check(self, call_sid: str) -> IssueResolutionState:
         state = self.get_state(call_sid)
         state.post_resolution_check_pending = False
+        state.post_resolution_prompt_count = 0
         return state
 
     def clear_issue(self, call_sid: str) -> IssueResolutionState:
@@ -75,6 +88,22 @@ class IssueResolutionService:
         state.issue_type = None
         state.symptom = None
         state.follow_up_count = 0
+        state.repeat_suppression_count = 0
+        return state
+
+    def register_post_resolution_prompt(self, call_sid: str) -> IssueResolutionState:
+        state = self.get_state(call_sid)
+        state.post_resolution_prompt_count += 1
+        return state
+
+    def register_repeat_suppression(self, call_sid: str) -> IssueResolutionState:
+        state = self.get_state(call_sid)
+        state.repeat_suppression_count += 1
+        return state
+
+    def clear_repeat_suppression(self, call_sid: str) -> IssueResolutionState:
+        state = self.get_state(call_sid)
+        state.repeat_suppression_count = 0
         return state
 
     def reset(self, call_sid: str) -> None:

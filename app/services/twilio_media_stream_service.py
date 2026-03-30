@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import logging
+import re
 import wave
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -30,6 +31,14 @@ from app.core.conversation_prompts import (
     TTS_REQUESTED,
     TRANSCRIBING,
     UTTERANCE_FINALIZED,
+    build_identity_verification_prompt,
+    build_empty_input_reply,
+    build_opening_greeting,
+    detect_consent_choice,
+    detect_escalation_request,
+    detect_resolution_choice,
+    is_short_valid_intent,
+    wants_goodbye,
 )
 from app.db.database import AsyncSessionLocal
 from app.services.audio_quality_service import get_audio_quality_service
@@ -37,6 +46,7 @@ from app.services.conversation_service import ConversationReply, ConversationSer
 from app.services.gemini_service import GeminiService
 from app.services.issue_resolution_service import get_issue_resolution_service
 from app.services.realtime_service import RealtimeService, emit_latency_event, get_realtime_service
+from app.services.rollout_service import get_rollout_service
 from app.services.sarvam_stt_service import STTChunkStreamSession, STTResult, SarvamSTTService
 from app.services.sarvam_tts_service import SarvamTTSService
 from app.services.stream_vad_service import get_stream_vad_service
@@ -63,6 +73,12 @@ class QueuedUtterance:
 
 
 @dataclass
+class StreamedAssistantSentence:
+    text: str
+    language_code: str
+
+
+@dataclass
 class MediaStreamSession:
     websocket: WebSocket
     call_sid: str
@@ -86,6 +102,16 @@ class MediaStreamSession:
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     utterance_queue: asyncio.Queue[QueuedUtterance] | None = None
     stt_chunk_stream: STTChunkStreamSession | None = None
+    assistant_response_epoch: int = 0
+    last_barge_gate_reason: str = ""
+    last_barge_gate_logged_at: float = 0.0
+    llm_streaming_enabled: bool = True
+    tts_persistent_ws_enabled: bool = False
+    tts_native_mulaw_enabled: bool = False
+    tts_slow_streak: int = 0
+    tts_slow_mode_until: float = 0.0
+    rollout_bucket: int = 0
+    last_noise_reprompt_at: float = 0.0
     closed: bool = False
 
 
@@ -107,7 +133,10 @@ class TwilioMediaStreamService:
         self.vad_service = get_vad_service(settings)
         self.stream_vad_service = get_stream_vad_service(settings)
         self.issue_resolution_service = get_issue_resolution_service()
+        self.rollout_service = get_rollout_service()
         self._sessions: dict[int, MediaStreamSession] = {}
+        self._tts_warmed_languages: set[str] = set()
+        self._tts_warmup_lock = asyncio.Lock()
 
     async def handle_websocket(self, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -165,13 +194,22 @@ class TwilioMediaStreamService:
             customer_name=(custom.get("customer_name") or "").strip(),
             language=(custom.get("language") or "en-IN").strip() or "en-IN",
             customer_number=(custom.get("customer_number") or "").strip() or None,
+            llm_streaming_enabled=self.settings.llm_streaming,
+            tts_persistent_ws_enabled=self.settings.tts_persistent_ws,
+            tts_native_mulaw_enabled=self.settings.tts_native_mulaw,
         )
+        rollout_decision = self.rollout_service.get_decision(session.call_sid)
+        session.rollout_bucket = rollout_decision.bucket
+        session.llm_streaming_enabled = rollout_decision.llm_streaming
+        session.tts_persistent_ws_enabled = rollout_decision.tts_persistent_ws
+        session.tts_native_mulaw_enabled = rollout_decision.tts_native_mulaw
         logger.info(
-            "Latency step=twilio_media_stream_start call=%s stream=%s timestamp=%s language=%s",
+            "Latency step=twilio_media_stream_start call=%s stream=%s timestamp=%s language=%s customer_name=%s",
             session.call_sid,
             session.stream_sid,
             utc_now_iso(),
             session.language,
+            session.customer_name or "unknown",
         )
         emit_latency_event(
             {
@@ -180,6 +218,11 @@ class TwilioMediaStreamService:
                 "stream_sid": session.stream_sid,
                 "event_timestamp": utc_now_iso(),
                 "language": session.language,
+                "customer_name": session.customer_name or "",
+                "rollout_bucket": session.rollout_bucket,
+                "llm_streaming_enabled": session.llm_streaming_enabled,
+                "tts_persistent_ws_enabled": session.tts_persistent_ws_enabled,
+                "tts_native_mulaw_enabled": session.tts_native_mulaw_enabled,
             }
         )
         if self.settings.stream_stt_enable_micro_chunking:
@@ -190,8 +233,18 @@ class TwilioMediaStreamService:
                 frame_ms=self.settings.stream_webrtc_vad_frame_ms,
                 chunk_ms=self.settings.stream_stt_chunk_ms,
                 preroll_ms=self.settings.stream_stt_preroll_ms,
-                enable_persistent=self.settings.stream_stt_enable_persistent_connection,
+                # Keep chunking enabled but disable persistent provider STT stream for telephony
+                # to avoid long timeout stalls and perceived silence.
+                enable_persistent=False,
             )
+        if session.tts_persistent_ws_enabled:
+            with contextlib.suppress(Exception):
+                await self.tts_service.open_call_stream(
+                    call_sid=session.call_sid,
+                    language_code=session.language,
+                )
+        if self.settings.tts_static_prompt_warmup:
+            asyncio.create_task(self._warm_static_tts_prompts(session.language))
         session.utterance_queue = asyncio.Queue(maxsize=self.settings.stream_utterance_queue_maxsize)
         session.processing_task = asyncio.create_task(self._consume_utterances(session))
         await self.realtime_service.publish_call_phase(session.call_sid, GREETING)
@@ -201,6 +254,15 @@ class TwilioMediaStreamService:
                 "type": "stream_status",
                 "call_sid": session.call_sid,
                 "status": "connected",
+                "timestamp": self._now_iso(),
+            },
+        )
+        await self.realtime_service.broadcast_call_event(
+            session.call_sid,
+            {
+                "type": "rollout_status",
+                "call_sid": session.call_sid,
+                "rollout": rollout_decision.as_payload(),
                 "timestamp": self._now_iso(),
             },
         )
@@ -251,6 +313,8 @@ class TwilioMediaStreamService:
                 await self._cancel_playback(session, reason="customer-speech")
         else:
             session.barge_in_speech_ms = 0
+            session.last_barge_gate_reason = ""
+            session.last_barge_gate_logged_at = 0.0
 
         if is_speech:
             if not session.customer_speaking:
@@ -307,6 +371,32 @@ class TwilioMediaStreamService:
 
         if speech_ms < self.settings.stream_vad_min_speech_ms:
             logger.debug("Skipping short utterance for call=%s speech_ms=%s", session.call_sid, speech_ms)
+            if session.stt_chunk_stream is not None:
+                self.stt_service.discard_utterance_chunks(session.stt_chunk_stream)
+            return
+
+        playback_active = bool(session.playback_task and not session.playback_task.done())
+        weak_playback_utterance_threshold = max(
+            420,
+            int(self.settings.stream_barge_in_min_speech_ms * 0.8),
+        )
+        if playback_active and speech_ms < weak_playback_utterance_threshold:
+            logger.info(
+                "Latency step=utterance_dropped_during_playback call=%s timestamp=%s speech_ms=%s threshold_ms=%s",
+                session.call_sid,
+                utterance_finalized_at,
+                speech_ms,
+                weak_playback_utterance_threshold,
+            )
+            emit_latency_event(
+                {
+                    "step": "utterance_dropped_during_playback",
+                    "call_sid": session.call_sid,
+                    "event_timestamp": utterance_finalized_at,
+                    "speech_ms": speech_ms,
+                    "threshold_ms": weak_playback_utterance_threshold,
+                }
+            )
             if session.stt_chunk_stream is not None:
                 self.stt_service.discard_utterance_chunks(session.stt_chunk_stream)
             return
@@ -479,6 +569,23 @@ class TwilioMediaStreamService:
                         "queue_depth": queue.qsize(),
                     }
                 )
+                if queue_wait_ms > 800 and queue.qsize() > 0:
+                    logger.warning(
+                        "Dropping stale dequeued utterance for call=%s queue_wait_ms=%s remaining_queue=%s",
+                        session.call_sid,
+                        queue_wait_ms,
+                        queue.qsize(),
+                    )
+                    emit_latency_event(
+                        {
+                            "step": "utterance_queue_stale_drop",
+                            "call_sid": session.call_sid,
+                            "event_timestamp": utc_now_iso(),
+                            "queue_wait_ms": queue_wait_ms,
+                            "remaining_queue_depth": queue.qsize(),
+                        }
+                    )
+                    continue
                 await self._process_utterance(session, queued)
             except asyncio.CancelledError:
                 raise
@@ -489,6 +596,8 @@ class TwilioMediaStreamService:
 
     async def _process_utterance(self, session: MediaStreamSession, queued: QueuedUtterance) -> None:
         async with session.processing_lock:
+            session.assistant_response_epoch += 1
+            response_epoch = session.assistant_response_epoch
             turn_started_at = perf_counter()
             logger.info(
                 "Latency step=customer_audio_received call=%s mode=media_stream timestamp=%s audio_bytes=%s",
@@ -551,9 +660,12 @@ class TwilioMediaStreamService:
                         self.stt_service.transcribe(
                             audio_bytes=wav_audio,
                             filename="twilio-stream.wav",
-                            content_type="audio/wav",
+                            # Force stable REST STT path for telephony media streams to avoid
+                            # streaming-timeout stalls that create long perceived silence.
+                            content_type="audio/x-wav",
                             language_code=session.language or "unknown",
                             call_sid=session.call_sid,
+                            force_rest=True,
                         ),
                         timeout=max(2.0, self.settings.stream_stt_turn_timeout_seconds),
                     )
@@ -581,11 +693,14 @@ class TwilioMediaStreamService:
                         speech_detected=False,
                     )
                 except Exception as exc:  # noqa: BLE001
+                    error_type = type(exc).__name__
+                    error_detail = " ".join(str(exc).strip().split()) or "No error details available"
                     logger.warning(
-                        "STT turn failed for call=%s speech_ms=%s; proceeding with empty transcript. error=%s",
+                        "STT turn failed for call=%s speech_ms=%s; proceeding with empty transcript. error_type=%s detail=%s",
                         session.call_sid,
                         queued.speech_ms,
-                        exc,
+                        error_type,
+                        error_detail,
                     )
                     emit_latency_event(
                         {
@@ -594,6 +709,8 @@ class TwilioMediaStreamService:
                             "event_timestamp": utc_now_iso(),
                             "speech_ms": queued.speech_ms,
                             "audio_bytes": len(selected_mulaw_audio),
+                            "error_type": error_type,
+                            "error_detail": error_detail,
                         }
                     )
                     stt_result = STTResult(
@@ -628,26 +745,155 @@ class TwilioMediaStreamService:
                 }
             )
             transcript = sanitize_spoken_text(stt_result.transcript)
+            ignore_noise_transcript = self._should_ignore_noise_transcript(transcript)
 
-            if transcript and session.playback_task and not session.playback_task.done():
-                await self._cancel_playback(session, reason="customer-utterance-finalized")
-
-            async with self.session_factory() as db:
-                service = self._build_conversation_service(db)
-                reply = await service.handle_live_transcript(
-                    call_sid=session.call_sid,
-                    transcript=transcript,
-                    from_number=session.customer_number,
-                    to_number=self.settings.twilio_phone_number,
-                    audio_bytes=wav_audio,
-                    detected_language=stt_result.language_code,
-                    confidence=stt_result.confidence,
-                    confidence_source=stt_result.confidence_source,
-                    speech_detected=stt_result.speech_detected,
+            should_interrupt_playback = bool(
+                not ignore_noise_transcript
+                and (
+                    queued.speech_ms >= self.settings.stream_vad_min_speech_ms
+                    or stt_result.speech_detected
+                    or transcript
                 )
+            )
+            if should_interrupt_playback and session.playback_task and not session.playback_task.done():
+                # Avoid cutting assistant audio on weak/ambiguous turns.
+                token_count = len(transcript.split())
+                short_transcript = token_count <= 1
+                low_confidence = (stt_result.confidence or 0.0) < max(0.45, self.settings.stt_confidence_threshold * 0.9)
+                weak_barge_in = queued.speech_ms < max(
+                    self.settings.stream_barge_in_min_speech_ms,
+                    self.settings.barge_in_min_speech_ms,
+                )
+                if (not transcript and weak_barge_in) or (short_transcript and low_confidence and weak_barge_in):
+                    should_interrupt_playback = False
+                # Require stronger evidence before interrupting active TTS playback.
+                if transcript and token_count < 2 and low_confidence:
+                    should_interrupt_playback = False
+                if queued.speech_ms < max(520, int(self.settings.stream_barge_in_min_speech_ms * 0.8)):
+                    should_interrupt_playback = False
+            if should_interrupt_playback and session.playback_task and not session.playback_task.done():
+                cancel_reason = "customer-utterance-finalized"
+                if not transcript and (queued.speech_ms >= self.settings.stream_vad_min_speech_ms or stt_result.speech_detected):
+                    cancel_reason = "customer-speech-no-transcript"
+                await self._cancel_playback(session, reason=cancel_reason)
+            if ignore_noise_transcript:
+                logger.info(
+                    "Latency step=stt_transcript_ignored call=%s timestamp=%s reason=near_empty_noise transcript_preview=%s",
+                    session.call_sid,
+                    utc_now_iso(),
+                    transcript[:80],
+                )
+                emit_latency_event(
+                    {
+                        "step": "stt_transcript_ignored",
+                        "call_sid": session.call_sid,
+                        "event_timestamp": utc_now_iso(),
+                        "reason": "near_empty_noise",
+                        "transcript_preview": transcript[:80],
+                    }
+                )
+                if not session.closed:
+                    await self.realtime_service.publish_call_phase(session.call_sid, LISTENING)
+                    await self._schedule_noise_reprompt(
+                        session=session,
+                        transcript_preview=transcript[:80],
+                        speech_ms=queued.speech_ms,
+                        silence_to_stt_ms=silence_to_stt_ms,
+                    )
+                return
+
+            stream_sentence_queue: asyncio.Queue[StreamedAssistantSentence | None] | None = None
+            stream_completion_future: asyncio.Future[bool] | None = None
+            streamed_sentence_count = 0
+            rollout_decision = self.rollout_service.get_decision(session.call_sid)
+            session.llm_streaming_enabled = rollout_decision.llm_streaming
+            session.tts_persistent_ws_enabled = rollout_decision.tts_persistent_ws
+            session.tts_native_mulaw_enabled = rollout_decision.tts_native_mulaw
+
+            try:
+                async with self.session_factory() as db:
+                    service = self._build_conversation_service(db)
+                    on_assistant_sentence = None
+                    if session.llm_streaming_enabled:
+                        stream_sentence_queue = asyncio.Queue(maxsize=12)
+                        stream_completion_future = asyncio.get_running_loop().create_future()
+
+                        async def queue_streamed_sentence(text: str, language_code: str) -> None:
+                            nonlocal streamed_sentence_count
+                            if response_epoch != session.assistant_response_epoch:
+                                emit_latency_event(
+                                    {
+                                        "step": "assistant_stream_sentence_dropped",
+                                        "call_sid": session.call_sid,
+                                        "event_timestamp": utc_now_iso(),
+                                        "reason": "stale_response_epoch",
+                                    }
+                                )
+                                return
+                            if not text.strip() or session.closed:
+                                return
+                            if session.playback_task is None or session.playback_task.done():
+                                session.playback_task = asyncio.create_task(
+                                    self._play_streamed_sentences(
+                                        session,
+                                        sentence_queue=stream_sentence_queue,
+                                        should_hangup_future=stream_completion_future,
+                                        response_epoch=response_epoch,
+                                    )
+                                )
+                            try:
+                                stream_sentence_queue.put_nowait(
+                                    StreamedAssistantSentence(
+                                        text=text,
+                                        language_code=language_code or session.language,
+                                    )
+                                )
+                                streamed_sentence_count += 1
+                            except asyncio.QueueFull:
+                                logger.warning(
+                                    "Dropping streamed assistant sentence due to queue pressure call=%s queue_depth=%s",
+                                    session.call_sid,
+                                    stream_sentence_queue.qsize(),
+                                )
+
+                        on_assistant_sentence = queue_streamed_sentence
+
+                    reply = await service.handle_live_transcript(
+                        call_sid=session.call_sid,
+                        transcript=transcript,
+                        customer_name=session.customer_name,
+                        from_number=session.customer_number,
+                        to_number=self.settings.twilio_phone_number,
+                        audio_bytes=wav_audio,
+                        detected_language=stt_result.language_code,
+                            confidence=stt_result.confidence,
+                            confidence_source=stt_result.confidence_source,
+                            speech_detected=stt_result.speech_detected,
+                            on_assistant_sentence=on_assistant_sentence,
+                            llm_streaming_enabled=session.llm_streaming_enabled,
+                        )
+            except Exception:
+                if stream_completion_future is not None and not stream_completion_future.done():
+                    stream_completion_future.set_result(False)
+                if stream_sentence_queue is not None:
+                    with contextlib.suppress(Exception):
+                        await stream_sentence_queue.put(None)
+                raise
 
             session.language = reply.language_code
-            session.playback_task = asyncio.create_task(self._play_reply(session, reply))
+            if stream_sentence_queue is not None and stream_completion_future is not None:
+                if not stream_completion_future.done():
+                    stream_completion_future.set_result(reply.should_hangup)
+                if streamed_sentence_count > 0:
+                    await stream_sentence_queue.put(None)
+                else:
+                    if session.playback_task and not session.playback_task.done():
+                        session.playback_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await session.playback_task
+                    session.playback_task = asyncio.create_task(self._play_reply(session, reply))
+            else:
+                session.playback_task = asyncio.create_task(self._play_reply(session, reply))
             logger.info(
                 "Latency step=assistant_reply_ready call=%s mode=media_stream started_at=%s completed_at=%s total_ms=%s",
                 session.call_sid,
@@ -675,9 +921,8 @@ class TwilioMediaStreamService:
             session.barge_in_speech_ms = 0
             session.playback_started_notified = False
             await self.realtime_service.publish_speaking_event(session.call_sid, "assistant", True)
-            streaming_codec = self.tts_service.output_audio_codec
+            streaming_codec = "mulaw"
             session.current_tts_codec = streaming_codec
-            first_audio_chunk = True
             await self._publish_tts_status(
                 session,
                 {
@@ -688,73 +933,36 @@ class TwilioMediaStreamService:
                 },
             )
             await self.realtime_service.publish_call_phase(session.call_sid, TTS_REQUESTED)
-
-            if streaming_codec == "mulaw":
-                async for mulaw_audio in self.tts_service.synthesize_chunks(
-                    text=reply.text,
-                    language_code=reply.language_code,
-                    call_sid=session.call_sid,
-                    output_audio_codec=streaming_codec,
-                    use_cache=False,
-                ):
-                    if first_audio_chunk:
-                        first_audio_chunk = False
-                        await self._mark_tts_first_chunk_ready(
-                            session,
-                            codec=streaming_codec,
-                            chunk_bytes=len(mulaw_audio),
-                            chunk_kind="mulaw",
-                        )
-                    await self._send_mulaw_audio(session, mulaw_audio)
-            elif streaming_codec == "linear16":
-                input_rate = self.tts_service.resolve_sample_rate(streaming_codec)
-                pcm_stream = self.tts_service.synthesize_chunks(
-                    text=reply.text,
-                    language_code=reply.language_code,
-                    call_sid=session.call_sid,
-                    output_audio_codec=streaming_codec,
-                    use_cache=False,
+            sentence_max_chars = self._effective_sentence_limit(session)
+            reply_chunks = self._chunk_reply_for_tts(reply.text, max_chars=sentence_max_chars)
+            first_audio_chunk_ref = {"pending": True}
+            if len(reply_chunks) > 1:
+                logger.info(
+                    "Latency step=assistant_tts_chunked call=%s timestamp=%s chunk_count=%s max_chars=%s",
+                    session.call_sid,
+                    utc_now_iso(),
+                    len(reply_chunks),
+                    sentence_max_chars,
                 )
-
-                async def log_first_pcm_chunk(chunk_size: int) -> None:
-                    nonlocal first_audio_chunk
-                    if not first_audio_chunk:
-                        return
-                    first_audio_chunk = False
-                    await self._mark_tts_first_chunk_ready(
-                        session,
-                        codec=streaming_codec,
-                        chunk_bytes=chunk_size,
-                        chunk_kind="pcm",
-                    )
-
-                await self._stream_linear16_audio_as_mulaw(
+                emit_latency_event(
+                    {
+                        "step": "assistant_tts_chunked",
+                        "call_sid": session.call_sid,
+                        "event_timestamp": utc_now_iso(),
+                        "chunk_count": len(reply_chunks),
+                        "max_chars": sentence_max_chars,
+                    }
+                )
+            for chunk_text in reply_chunks:
+                if session.closed:
+                    return
+                await self._play_tts_text(
                     session=session,
-                    pcm_stream=pcm_stream,
-                    input_rate=input_rate,
-                    on_first_pcm_chunk=log_first_pcm_chunk,
-                )
-            else:
-                tts_parts: list[bytes] = []
-                async for audio_chunk in self.tts_service.synthesize_chunks(
-                    text=reply.text,
+                    text=chunk_text,
                     language_code=reply.language_code,
-                    call_sid=session.call_sid,
-                    output_audio_codec=streaming_codec,
-                    use_cache=False,
-                ):
-                    tts_parts.append(audio_chunk)
-                tts_bytes = b"".join(tts_parts)
-                if not tts_bytes:
-                    raise RuntimeError("Sarvam TTS returned no audio data.")
-                await self._mark_tts_first_chunk_ready(
-                    session,
-                    codec=streaming_codec,
-                    chunk_bytes=len(tts_bytes),
-                    chunk_kind="provider-audio",
+                    streaming_codec=streaming_codec,
+                    first_audio_chunk_ref=first_audio_chunk_ref,
                 )
-                mulaw_audio = await self._transcode_tts_to_mulaw(tts_bytes)
-                await self._send_mulaw_audio(session, mulaw_audio)
 
             await self._send_json(
                 session,
@@ -782,6 +990,126 @@ class TwilioMediaStreamService:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(self.twilio_service.end_call, session.call_sid)
 
+    async def _play_streamed_sentences(
+        self,
+        session: MediaStreamSession,
+        *,
+        sentence_queue: asyncio.Queue[StreamedAssistantSentence | None],
+        should_hangup_future: asyncio.Future[bool],
+        response_epoch: int,
+    ) -> None:
+        if session.closed:
+            return
+
+        should_hangup = False
+        try:
+            session.assistant_playback_started_at = asyncio.get_running_loop().time()
+            session.barge_in_speech_ms = 0
+            session.playback_started_notified = False
+            await self.realtime_service.publish_speaking_event(session.call_sid, "assistant", True)
+            streaming_codec = "mulaw"
+            session.current_tts_codec = streaming_codec
+            await self._publish_tts_status(
+                session,
+                {
+                    "stage": "tts_requested",
+                    "codec": streaming_codec,
+                    "language": session.language,
+                    "text_preview": "[streaming-sentences]",
+                },
+            )
+            await self.realtime_service.publish_call_phase(session.call_sid, TTS_REQUESTED)
+
+            first_audio_chunk_ref = {"pending": True}
+            while True:
+                if response_epoch != session.assistant_response_epoch:
+                    break
+                queued_sentence = await sentence_queue.get()
+                try:
+                    if queued_sentence is None:
+                        break
+                    if response_epoch != session.assistant_response_epoch:
+                        break
+                    sentence_max_chars = self._effective_sentence_limit(session)
+                    text = sanitize_spoken_text(queued_sentence.text, max_length=sentence_max_chars)
+                    if not text:
+                        continue
+                    await self._play_tts_text(
+                        session=session,
+                        text=text,
+                        language_code=queued_sentence.language_code or session.language,
+                        streaming_codec=streaming_codec,
+                        first_audio_chunk_ref=first_audio_chunk_ref,
+                    )
+                finally:
+                    sentence_queue.task_done()
+
+            await self._send_json(
+                session,
+                {
+                    "event": "mark",
+                    "streamSid": session.stream_sid,
+                    "mark": {"name": f"assistant-turn-{int(asyncio.get_running_loop().time() * 1000)}"},
+                },
+            )
+        except asyncio.CancelledError:
+            logger.info("Assistant streamed playback cancelled for call=%s", session.call_sid)
+            raise
+        finally:
+            session.assistant_playback_started_at = None
+            session.barge_in_speech_ms = 0
+            session.playback_started_notified = False
+            session.current_tts_codec = ""
+            await self.realtime_service.publish_speaking_event(session.call_sid, "assistant", False)
+            if should_hangup_future.done():
+                with contextlib.suppress(Exception):
+                    should_hangup = bool(should_hangup_future.result())
+
+        if not session.closed and not should_hangup:
+            await self.realtime_service.publish_call_phase(session.call_sid, LISTENING)
+
+        if should_hangup:
+            await asyncio.sleep(0.5)
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(self.twilio_service.end_call, session.call_sid)
+
+    async def _play_tts_text(
+        self,
+        *,
+        session: MediaStreamSession,
+        text: str,
+        language_code: str,
+        streaming_codec: str,
+        first_audio_chunk_ref: dict[str, bool],
+    ) -> None:
+        if streaming_codec != "mulaw":
+            raise RuntimeError(f"Unsupported streaming codec for Twilio media stream: {streaming_codec}")
+
+        started_at = perf_counter()
+        total_audio_bytes = 0
+        async for mulaw_audio in self.tts_service.synthesize_chunks(
+            text=text,
+            language_code=language_code,
+            call_sid=session.call_sid,
+            output_audio_codec=streaming_codec,
+            use_cache=False,
+        ):
+            total_audio_bytes += len(mulaw_audio)
+            if first_audio_chunk_ref.get("pending", False):
+                first_audio_chunk_ref["pending"] = False
+                await self._mark_tts_first_chunk_ready(
+                    session,
+                    codec=streaming_codec,
+                    chunk_bytes=len(mulaw_audio),
+                    chunk_kind="mulaw",
+                )
+            await self._send_mulaw_audio(session, mulaw_audio)
+        self._update_tts_slow_mode(
+            session,
+            tts_latency_ms=int((perf_counter() - started_at) * 1000),
+            audio_bytes=total_audio_bytes,
+        )
+
     async def _cancel_playback(self, session: MediaStreamSession, reason: str) -> None:
         if not session.playback_task or session.playback_task.done():
             return
@@ -808,6 +1136,13 @@ class TwilioMediaStreamService:
         session.playback_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await session.playback_task
+        # Reset persistent TTS stream only for hard interruption cases to avoid audible restart artifacts.
+        if session.tts_persistent_ws_enabled and reason in {"customer-speech-no-transcript", "customer-speech"}:
+            with contextlib.suppress(Exception):
+                await self.tts_service.reset_call_stream(
+                    session.call_sid,
+                    language_code=session.language,
+                )
         await self._send_json(
             session,
             {
@@ -875,6 +1210,9 @@ class TwilioMediaStreamService:
             with contextlib.suppress(Exception):
                 await self.stt_service.close_stream(session.stt_chunk_stream)
             session.stt_chunk_stream = None
+        if session.tts_persistent_ws_enabled:
+            with contextlib.suppress(Exception):
+                await self.tts_service.close_call_stream(session.call_sid)
         if session.customer_speaking:
             await self.realtime_service.publish_speaking_event(session.call_sid, "customer", False)
         await self.realtime_service.publish_speaking_event(session.call_sid, "assistant", False)
@@ -895,7 +1233,8 @@ class TwilioMediaStreamService:
                 },
             )
             await self.realtime_service.publish_call_phase(session.call_sid, PLAYBACK_STARTED)
-        chunk_size = 160
+        # Larger packet size reduces websocket overhead and audible jitter.
+        chunk_size = 320
         for index in range(0, len(mulaw_audio), chunk_size):
             if session.closed:
                 return
@@ -910,76 +1249,126 @@ class TwilioMediaStreamService:
                     },
                 },
             )
-            await asyncio.sleep(max(0.01, len(chunk) / 8000))
+            frame_duration_s = len(chunk) / 8000
+            await asyncio.sleep(max(0.006, frame_duration_s * 0.9))
 
-    async def _stream_linear16_audio_as_mulaw(
-        self,
-        *,
-        session: MediaStreamSession,
-        pcm_stream,
-        input_rate: int,
-        on_first_pcm_chunk,
-    ) -> None:
-        process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            "-loglevel",
-            "error",
-            "-f",
-            "s16le",
-            "-ar",
-            str(input_rate),
-            "-ac",
-            "1",
-            "-i",
-            "pipe:0",
-            "-af",
-            "highpass=f=120,lowpass=f=3400,acompressor=threshold=-18dB:ratio=2.5:attack=5:release=50,volume=1.5,aresample=resampler=soxr",
-            "-ar",
-            "8000",
-            "-ac",
-            "1",
-            "-f",
-            "mulaw",
-            "pipe:1",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+    async def _warm_static_tts_prompts(self, language_code: str) -> None:
+        normalized_language = (language_code or "hi-IN").strip() or "hi-IN"
+        async with self._tts_warmup_lock:
+            if normalized_language in self._tts_warmed_languages:
+                return
+            self._tts_warmed_languages.add(normalized_language)
+
+        # Let first live turn start immediately; warmup runs opportunistically in background.
+        await asyncio.sleep(1.0)
+        prompts = [
+            build_opening_greeting(language=normalized_language),
+            build_identity_verification_prompt(language=normalized_language),
+            "नमस्ते।" if normalized_language == "hi-IN" else "Hello.",
+        ]
+        for text in prompts:
+            with contextlib.suppress(Exception):
+                await self.tts_service.synthesize_bytes(
+                    text=sanitize_spoken_text(text, max_length=max(80, int(self.settings.assistant_tts_max_chars))),
+                    language_code=normalized_language,
+                    call_sid="",
+                    output_audio_codec="mulaw",
+                    use_cache=False,
+                )
+
+    def _effective_sentence_limit(self, session: MediaStreamSession) -> int:
+        base_limit = max(80, int(self.settings.assistant_tts_sentence_max_chars))
+        now = asyncio.get_running_loop().time()
+        if now < session.tts_slow_mode_until:
+            return max(70, min(base_limit, int(self.settings.assistant_tts_slow_mode_sentence_max_chars)))
+        return base_limit
+
+    def _chunk_reply_for_tts(self, text: str, *, max_chars: int) -> list[str]:
+        clean_text = sanitize_spoken_text(text, max_length=max(80, int(self.settings.assistant_tts_max_chars)))
+        if not clean_text:
+            return []
+        limit = max(70, max_chars)
+        if len(clean_text) <= limit:
+            return [clean_text]
+
+        sentence_like_parts = [part.strip() for part in re.split(r"(?<=[.!?।])\s+", clean_text) if part.strip()]
+        if not sentence_like_parts:
+            sentence_like_parts = [clean_text]
+
+        chunks: list[str] = []
+        current = ""
+
+        def flush_current() -> None:
+            nonlocal current
+            if current.strip():
+                chunks.append(current.strip())
+            current = ""
+
+        for part in sentence_like_parts:
+            if len(part) > limit:
+                flush_current()
+                words = part.split()
+                window = ""
+                for word in words:
+                    candidate = f"{window} {word}".strip()
+                    if len(candidate) <= limit:
+                        window = candidate
+                    else:
+                        if window:
+                            chunks.append(window)
+                        window = word
+                if window:
+                    chunks.append(window)
+                continue
+
+            candidate = f"{current} {part}".strip() if current else part
+            if len(candidate) <= limit:
+                current = candidate
+            else:
+                flush_current()
+                current = part
+
+        flush_current()
+        final_chunks = chunks or [clean_text]
+        if len(final_chunks) > 2:
+            final_chunks = [final_chunks[0], " ".join(final_chunks[1:]).strip()]
+        return final_chunks
+
+    def _update_tts_slow_mode(self, session: MediaStreamSession, *, tts_latency_ms: int, audio_bytes: int) -> None:
+        threshold_ms = max(1500, int(self.settings.assistant_tts_slow_threshold_ms))
+        trigger_count = max(1, int(self.settings.assistant_tts_slow_trigger_count))
+        mode_seconds = max(20, int(self.settings.assistant_tts_slow_mode_seconds))
+        now = asyncio.get_running_loop().time()
+
+        if tts_latency_ms >= threshold_ms:
+            session.tts_slow_streak += 1
+        else:
+            session.tts_slow_streak = max(0, session.tts_slow_streak - 1)
+
+        if session.tts_slow_streak < trigger_count:
+            return
+
+        session.tts_slow_mode_until = max(session.tts_slow_mode_until, now + mode_seconds)
+        session.tts_slow_streak = 0
+        logger.warning(
+            "Assistant TTS slow mode enabled call=%s ttl_s=%s threshold_ms=%s observed_ms=%s audio_bytes=%s",
+            session.call_sid,
+            mode_seconds,
+            threshold_ms,
+            tts_latency_ms,
+            audio_bytes,
         )
-
-        async def writer() -> None:
-            assert process.stdin is not None
-            try:
-                async for pcm_audio in pcm_stream:
-                    await on_first_pcm_chunk(len(pcm_audio))
-                    process.stdin.write(pcm_audio)
-                    await process.stdin.drain()
-            finally:
-                if process.stdin and not process.stdin.is_closing():
-                    process.stdin.close()
-
-        async def reader() -> None:
-            assert process.stdout is not None
-            while True:
-                mulaw_audio = await process.stdout.read(1600)
-                if not mulaw_audio:
-                    break
-                await self._send_mulaw_audio(session, mulaw_audio)
-
-        writer_task = asyncio.create_task(writer())
-        reader_task = asyncio.create_task(reader())
-        try:
-            await asyncio.gather(writer_task, reader_task)
-            stderr = b""
-            if process.stderr is not None:
-                stderr = await process.stderr.read()
-            returncode = await process.wait()
-            if returncode != 0:
-                raise RuntimeError(f"ffmpeg streaming transcoding failed: {stderr.decode('utf-8', 'ignore').strip()}")
-        finally:
-            if process.returncode is None:
-                process.kill()
-                with contextlib.suppress(ProcessLookupError):
-                    await process.wait()
+        emit_latency_event(
+            {
+                "step": "assistant_tts_slow_mode",
+                "call_sid": session.call_sid,
+                "event_timestamp": self._now_iso(),
+                "threshold_ms": threshold_ms,
+                "observed_ms": tts_latency_ms,
+                "mode_seconds": mode_seconds,
+                "audio_bytes": audio_bytes,
+            }
+        )
 
     def _build_conversation_service(self, session: AsyncSession) -> ConversationService:
         return ConversationService(
@@ -1007,21 +1396,60 @@ class TwilioMediaStreamService:
         if session.assistant_playback_started_at is None:
             return False
 
-        elapsed_ms = int((asyncio.get_running_loop().time() - session.assistant_playback_started_at) * 1000)
-        grace_ms = max(0, self.settings.stream_barge_in_grace_ms)
+        loop = asyncio.get_running_loop()
+        elapsed_ms = int((loop.time() - session.assistant_playback_started_at) * 1000)
+        grace_ms = max(0, self.settings.stream_barge_in_grace_ms, self.settings.barge_in_cooldown_ms)
         minimum_playback_ms = max(grace_ms, self.settings.stream_barge_in_min_playback_ms)
+        hard_floor_ms = max(grace_ms, minimum_playback_ms // 2)
+        required_speech_ms = max(160, self.settings.stream_barge_in_min_speech_ms, self.settings.barge_in_min_speech_ms)
+        strong_speech_ms = max(required_speech_ms + 220, int(required_speech_ms * 1.9))
+        if elapsed_ms < hard_floor_ms:
+            self._record_barge_in_gate_block(
+                session,
+                reason="before_hard_floor",
+                elapsed_ms=elapsed_ms,
+                required_speech_ms=required_speech_ms,
+                minimum_playback_ms=minimum_playback_ms,
+            )
+            return False
         if elapsed_ms < grace_ms:
+            self._record_barge_in_gate_block(
+                session,
+                reason="before_grace",
+                elapsed_ms=elapsed_ms,
+                required_speech_ms=required_speech_ms,
+                minimum_playback_ms=minimum_playback_ms,
+            )
             return False
 
-        required_speech_ms = max(120, self.settings.stream_barge_in_min_speech_ms)
-        strong_speech_ms = max(required_speech_ms + 120, int(required_speech_ms * 1.6))
-        if elapsed_ms < minimum_playback_ms and session.barge_in_speech_ms < strong_speech_ms:
+        if elapsed_ms < minimum_playback_ms and (session.barge_in_speech_ms < strong_speech_ms or not session.speech_active):
+            self._record_barge_in_gate_block(
+                session,
+                reason="before_min_playback_weak_speech",
+                elapsed_ms=elapsed_ms,
+                required_speech_ms=required_speech_ms,
+                minimum_playback_ms=minimum_playback_ms,
+            )
             return False
 
         if session.barge_in_speech_ms < required_speech_ms:
+            self._record_barge_in_gate_block(
+                session,
+                reason="below_required_speech",
+                elapsed_ms=elapsed_ms,
+                required_speech_ms=required_speech_ms,
+                minimum_playback_ms=minimum_playback_ms,
+            )
             return False
 
         if session.speech_ms and session.speech_ms < required_speech_ms:
+            self._record_barge_in_gate_block(
+                session,
+                reason="speech_window_too_short",
+                elapsed_ms=elapsed_ms,
+                required_speech_ms=required_speech_ms,
+                minimum_playback_ms=minimum_playback_ms,
+            )
             return False
 
         logger.info(
@@ -1041,6 +1469,38 @@ class TwilioMediaStreamService:
             }
         )
         return True
+
+    def _record_barge_in_gate_block(
+        self,
+        session: MediaStreamSession,
+        *,
+        reason: str,
+        elapsed_ms: int,
+        required_speech_ms: int,
+        minimum_playback_ms: int,
+    ) -> None:
+        now = asyncio.get_running_loop().time()
+        should_emit = (
+            reason != session.last_barge_gate_reason
+            or (now - session.last_barge_gate_logged_at) >= 0.25
+        )
+        if not should_emit:
+            return
+
+        session.last_barge_gate_reason = reason
+        session.last_barge_gate_logged_at = now
+        emit_latency_event(
+            {
+                "step": "barge_in_gate_blocked",
+                "call_sid": session.call_sid,
+                "event_timestamp": utc_now_iso(),
+                "reason": reason,
+                "playback_ms": elapsed_ms,
+                "speech_ms": session.barge_in_speech_ms,
+                "required_speech_ms": required_speech_ms,
+                "minimum_playback_ms": minimum_playback_ms,
+            }
+        )
 
     @staticmethod
     def _mulaw_to_wav(mulaw_audio: bytes) -> bytes:
@@ -1111,30 +1571,86 @@ class TwilioMediaStreamService:
             },
         )
 
-    async def _transcode_tts_to_mulaw(self, audio_bytes: bytes) -> bytes:
-        process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            "-loglevel",
-            "error",
-            "-i",
-            "pipe:0",
-            "-af",
-            "highpass=f=180,lowpass=f=3400,volume=1.5",
-            "-ar",
-            "8000",
-            "-ac",
-            "1",
-            "-f",
-            "mulaw",
-            "pipe:1",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+    def _should_ignore_noise_transcript(self, transcript: str) -> bool:
+        cleaned = sanitize_spoken_text(transcript)
+        if not cleaned:
+            return True
+        normalized = re.sub(r"\s+", " ", cleaned).strip().lower()
+        greeting_tokens = {"hello", "hi", "hii", "हलो", "हैलो", "नमस्ते"}
+        if normalized in greeting_tokens:
+            return False
+        if is_short_valid_intent(cleaned):
+            return False
+        if wants_goodbye(cleaned):
+            return False
+        if detect_resolution_choice(cleaned) != "unknown":
+            return False
+        if detect_consent_choice(cleaned) != "unknown":
+            return False
+        if detect_escalation_request(cleaned):
+            return False
+
+        meaningful_chars = sum(1 for char in normalized if char.isalnum())
+        if meaningful_chars < max(3, int(self.settings.empty_transcript_min_chars)):
+            return True
+        if len(normalized.split()) <= 1 and meaningful_chars <= 4:
+            return True
+        return False
+
+    async def _schedule_noise_reprompt(
+        self,
+        *,
+        session: MediaStreamSession,
+        transcript_preview: str,
+        speech_ms: int,
+        silence_to_stt_ms: int | None,
+    ) -> None:
+        if session.closed:
+            return
+        if session.playback_task and not session.playback_task.done():
+            return
+
+        loop_now = asyncio.get_running_loop().time()
+        # Avoid repetitive reprompts when caller stays silent/noisy.
+        if (loop_now - session.last_noise_reprompt_at) < 6.0:
+            return
+        session.last_noise_reprompt_at = loop_now
+
+        prompt_text = sanitize_spoken_text(
+            build_empty_input_reply(session.language),
+            max_length=max(40, int(self.settings.assistant_tts_max_chars)),
         )
-        stdout, stderr = await process.communicate(audio_bytes)
-        if process.returncode != 0:
-            raise RuntimeError(f"ffmpeg transcoding failed: {stderr.decode('utf-8', 'ignore').strip()}")
-        return stdout
+        if not prompt_text:
+            return
+
+        logger.info(
+            "Latency step=assistant_noise_reprompt call=%s timestamp=%s speech_ms=%s silence_to_stt_ms=%s transcript_preview=%s",
+            session.call_sid,
+            utc_now_iso(),
+            speech_ms,
+            silence_to_stt_ms,
+            transcript_preview,
+        )
+        emit_latency_event(
+            {
+                "step": "assistant_noise_reprompt",
+                "call_sid": session.call_sid,
+                "event_timestamp": utc_now_iso(),
+                "speech_ms": speech_ms,
+                "silence_to_stt_ms": silence_to_stt_ms,
+                "transcript_preview": transcript_preview,
+            }
+        )
+        session.playback_task = asyncio.create_task(
+            self._play_reply(
+                session,
+                ConversationReply(
+                    text=prompt_text,
+                    language_code=session.language or "hi-IN",
+                    should_hangup=False,
+                ),
+            )
+        )
 
     @staticmethod
     def _duration_ms(start_iso: str | None, end_iso: str | None) -> int | None:

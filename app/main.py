@@ -16,7 +16,7 @@ from app.utils.helpers import ensure_directory
 
 
 settings = get_settings()
-configure_logging(settings.log_level)
+configure_logging(settings.log_level, settings.app_env)
 ensure_directory(settings.dashboard_path)
 
 

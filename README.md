@@ -159,19 +159,49 @@ Main variables:
 TWILIO_ACCOUNT_SID=
 TWILIO_AUTH_TOKEN=
 TWILIO_PHONE_NUMBER=
+TWILIO_VALIDATE_WEBHOOK_SIGNATURE=true
 
 SARVAM_API_KEY=
 SARVAM_STT_MODEL=saaras:v3
 SARVAM_STT_USE_STREAMING=true
+STT_MODE=auto
+STT_STREAM_RETRY_MAX=2
+STT_STREAM_BACKOFF_MS=300
+STT_STREAM_CB_FAILS=3
 SARVAM_TTS_MODEL=bulbul:v3
 SARVAM_TTS_VOICE=shubh
 
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-2.5-flash
 
+# Feature flags for phased latency improvements
+LLM_STREAMING=false
+TTS_PERSISTENT_WS=false
+TTS_NATIVE_MULAW=false
+
 DATABASE_URL=sqlite:///./data/voice_agent.db
 PUBLIC_URL=https://your-public-url.example
 WEBRTC_ICE_SERVERS=stun:stun.l.google.com:19302
+BARGE_IN_MIN_SPEECH_MS=260
+BARGE_IN_COOLDOWN_MS=220
+STREAM_BARGE_IN_GRACE_MS=220
+STREAM_BARGE_IN_MIN_PLAYBACK_MS=1000
+STREAM_BARGE_IN_MIN_SPEECH_MS=450
+EMPTY_TRANSCRIPT_MIN_CHARS=1
+SLO_ALERTS_ENABLED=true
+SLO_ALERT_COOLDOWN_SECONDS=30
+SLO_WINDOW_SIZE=40
+SLO_STT_LATENCY_MS=3500
+SLO_GEMINI_LATENCY_MS=4500
+SLO_TTS_LATENCY_MS=3000
+ROLLOUT_ENABLED=false
+ROLLOUT_LLM_STREAMING_PERCENT=100
+ROLLOUT_TTS_PERSISTENT_WS_PERCENT=100
+ROLLOUT_TTS_NATIVE_MULAW_PERCENT=100
+ROLLOUT_AUTO_ROLLBACK_ENABLED=true
+ROLLOUT_ROLLBACK_CRITICAL_ALERTS_THRESHOLD=5
+ROLLOUT_ROLLBACK_ALERT_WINDOW_SECONDS=300
+ROLLOUT_ROLLBACK_DURATION_SECONDS=900
 ```
 
 Notes:
@@ -247,7 +277,7 @@ If you are testing locally, expose port `8000` with `ngrok`, `cloudflared`, or a
 ## Current Limitations
 
 - WebRTC signaling is scaffolded, but there is no full browser audio media bridge yet.
-- Twilio request signature validation is not implemented yet.
+- Twilio request signature validation is enforced for Twilio webhooks by default (`TWILIO_VALIDATE_WEBHOOK_SIGNATURE=true`).
 - Conversation memory is SQLite-backed and local to the app instance.
 - The system is tuned for guided BOBCards support flows, not open-ended banking operations.
 - Some provider integrations use fallback behavior when streaming APIs fail or return low-confidence output.

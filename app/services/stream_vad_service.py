@@ -45,7 +45,8 @@ class StreamVADService:
         rms = audioop.rms(linear_pcm, 2)
         threshold = self.settings.stream_vad_rms_threshold
         if during_playback:
-            threshold = max(240, int(threshold * 0.85))
+            # During assistant playback, be stricter to reduce echo-triggered false barge-ins.
+            threshold = max(420, int(threshold * 1.35))
         return rms >= threshold
 
     def _is_speech_webrtc(self, mulaw_audio: bytes, *, during_playback: bool) -> bool:
@@ -71,7 +72,9 @@ class StreamVADService:
                 speech_frames += 1
 
         if during_playback:
-            return speech_frames >= 1
+            # During playback, require a stronger speech ratio to avoid assistant echo being treated as customer speech.
+            required_frames = max(2, math.ceil(total_frames * 0.65))
+            return speech_frames >= required_frames
 
         ratio = self.settings.stream_webrtc_vad_min_speech_ratio
         required_frames = max(1, math.ceil(total_frames * max(0.1, min(1.0, ratio))))
