@@ -1,1 +1,0 @@
-{"type": "latency", "timestamp": "2026-03-25T16:42:25.056312+00:00", "step": "twilio_outbound_connect", "call_sid": "CAf15fca30cd03e9890ba74a88351eff0f", "to_number": "+918299805407", "request_sent_at": "2026-03-25T16:42:24.138+00:00", "response_received_at": "2026-03-25T16:42:25.055+00:00", "latency_ms": 916}
