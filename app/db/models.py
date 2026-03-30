@@ -28,6 +28,11 @@ class Call(Base):
         cascade="all, delete-orphan",
         order_by="Transcript.created_at",
     )
+    events: Mapped[list["CallEvent"]] = relationship(
+        back_populates="call",
+        cascade="all, delete-orphan",
+        order_by="CallEvent.created_at",
+    )
 
 
 class Transcript(Base):
@@ -58,3 +63,19 @@ class OptOut(Base):
         nullable=False,
     )
 
+
+class CallEvent(Base):
+    __tablename__ = "call_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    call_id: Mapped[int | None] = mapped_column(ForeignKey("calls.id", ondelete="CASCADE"), index=True, nullable=True)
+    call_sid: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    call: Mapped["Call | None"] = relationship(back_populates="events")

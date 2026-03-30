@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -7,8 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.database import get_db
-from app.db.models import Call, Transcript
-from app.db.schemas import ConversationEventRead, MonitorCallSummary, WebRTCSessionRead
+from app.db.models import Call, CallEvent, Transcript
+from app.db.schemas import CallStoredEventRead, ConversationEventRead, MonitorCallSummary, WebRTCSessionRead
 from app.services.realtime_service import get_realtime_service
 from app.services.webrtc_service import get_webrtc_service
 
@@ -113,6 +114,41 @@ async def get_call_latency_logs(
 ) -> list[dict[str, Any]]:
     realtime_service = get_realtime_service()
     return await realtime_service.load_persisted_latency_events(call_sid, limit)
+
+
+@router.get("/calls/{call_sid}/events", response_model=list[CallStoredEventRead])
+async def get_call_events(
+    call_sid: str,
+    limit: int = Query(default=500, ge=1, le=5000),
+    session: AsyncSession = Depends(get_db),
+) -> list[CallStoredEventRead]:
+    statement = (
+        select(CallEvent.id, CallEvent.call_sid, CallEvent.event_type, CallEvent.payload_json, CallEvent.created_at)
+        .where(CallEvent.call_sid == call_sid)
+        .order_by(CallEvent.created_at.desc(), CallEvent.id.desc())
+        .limit(limit)
+    )
+    result = await session.execute(statement)
+    rows = result.all()
+    events: list[CallStoredEventRead] = []
+    for row in rows:
+        payload: dict[str, Any] = {}
+        try:
+            raw_payload = json.loads(row.payload_json or "{}")
+            if isinstance(raw_payload, dict):
+                payload = raw_payload
+        except json.JSONDecodeError:
+            payload = {}
+        events.append(
+            CallStoredEventRead(
+                id=row.id,
+                call_sid=row.call_sid,
+                event_type=row.event_type,
+                payload=payload,
+                timestamp=row.created_at,
+            )
+        )
+    return events
 
 
 @router.post("/sessions", response_model=WebRTCSessionRead, status_code=status.HTTP_201_CREATED)

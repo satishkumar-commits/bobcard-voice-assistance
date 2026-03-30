@@ -10,9 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import WebSocket
+from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.logging import sanitize_log_payload
+from app.db.database import AsyncSessionLocal
+from app.db.models import Call, CallEvent
 from app.services.rollout_service import get_rollout_service
 from app.utils.helpers import ensure_directory
 
@@ -49,6 +52,7 @@ class RealtimeService:
         self._speaking_state: dict[str, dict[str, bool]] = {}
         self._slo_windows: dict[str, dict[str, list[float]]] = {}
         self._slo_alert_last_emit: dict[str, float] = {}
+        self._call_id_cache: dict[str, int | None] = {}
         self._latency_log_dir = latency_log_dir or Path("data/latency_logs")
         ensure_directory(self._latency_log_dir)
         self._lock = asyncio.Lock()
@@ -138,6 +142,8 @@ class RealtimeService:
         phase: str | None = None,
     ) -> None:
         snapshot = self._call_state.setdefault(call_sid, {})
+        if call_id is not None:
+            self._call_id_cache[call_sid] = call_id
         snapshot.update(
             {
                 "call_sid": call_sid,
@@ -372,6 +378,7 @@ class RealtimeService:
         if isinstance(call_sid, str) and call_sid:
             self._latency_history.setdefault(call_sid, []).append(latency_event)
             self._latency_history[call_sid] = self._latency_history[call_sid][-200:]
+            await self._persist_call_event(call_sid, latency_event)
 
         try:
             await asyncio.to_thread(self._append_latency_log, latency_event)
@@ -392,6 +399,7 @@ class RealtimeService:
         await self.broadcast_global_event(event)
 
     async def broadcast_call_event(self, call_sid: str, event: dict[str, Any]) -> None:
+        await self._persist_call_event(call_sid, event)
         recipients = await self._subscribers_for_call(call_sid)
         await self._broadcast(recipients, event)
 
@@ -483,6 +491,51 @@ class RealtimeService:
 
     async def _send_json(self, websocket: WebSocket, payload: dict[str, Any]) -> None:
         await websocket.send_json(payload)
+
+    async def _resolve_call_id(self, call_sid: str) -> int | None:
+        cached_call_id = self._call_id_cache.get(call_sid)
+        if isinstance(cached_call_id, int):
+            return cached_call_id
+
+        snapshot = self._call_state.get(call_sid, {})
+        snapshot_call_id = snapshot.get("call_id")
+        if isinstance(snapshot_call_id, int):
+            self._call_id_cache[call_sid] = snapshot_call_id
+            return snapshot_call_id
+        if isinstance(snapshot_call_id, str) and snapshot_call_id.isdigit():
+            resolved_id = int(snapshot_call_id)
+            self._call_id_cache[call_sid] = resolved_id
+            return resolved_id
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(Call.id).where(Call.call_sid == call_sid))
+            resolved = result.scalar_one_or_none()
+            if isinstance(resolved, int):
+                self._call_id_cache[call_sid] = resolved
+            return resolved
+
+    async def _persist_call_event(self, call_sid: str, event: dict[str, Any]) -> None:
+        normalized_call_sid = (call_sid or "").strip()
+        if not normalized_call_sid:
+            return
+
+        sanitized_event = sanitize_log_payload(event)
+        payload_text = json.dumps(sanitized_event, ensure_ascii=False, default=str)
+        event_type = str(sanitized_event.get("type") or "event")
+        call_id = await self._resolve_call_id(normalized_call_sid)
+
+        try:
+            async with AsyncSessionLocal() as session:
+                call_event = CallEvent(
+                    call_id=call_id,
+                    call_sid=normalized_call_sid,
+                    event_type=event_type,
+                    payload_json=payload_text,
+                )
+                session.add(call_event)
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to persist call event for %s: %s", normalized_call_sid, exc)
 
     @staticmethod
     def _safe_call_sid(call_sid: str | None) -> str:

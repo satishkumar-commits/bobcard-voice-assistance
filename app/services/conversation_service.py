@@ -459,6 +459,28 @@ class ConversationService:
             confidence_source=confidence_source,
             speech_detected=vad_decision.speech_detected,
         )
+        short_intent_detected = (
+            bool(transcript.strip())
+            and (
+                is_short_valid_intent(transcript)
+                or self._looks_like_issue_resolved(transcript)
+                or self._looks_like_no_issue_statement(transcript)
+            )
+        )
+        if short_intent_detected and not quality_assessment.transcript_reliable:
+            quality_state.last_reason = "short-intent-override"
+            quality_assessment.transcript_reliable = True
+            quality_assessment.reason = "short-intent-override"
+            emit_latency_event(
+                {
+                    "step": "short_intent_override_applied",
+                    "call_sid": call.call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "transcript_preview": sanitize_spoken_text(transcript)[:80],
+                    "confidence": round(quality_assessment.confidence, 3),
+                    "confidence_source": quality_assessment.confidence_source,
+                }
+            )
         if low_signal_transcript:
             quality_state.last_reason = "empty-transcript-guard"
             quality_assessment.transcript_reliable = False
@@ -2280,6 +2302,16 @@ class ConversationService:
             objective = "Break issue-capture loops when caller says no issue remains."
             response_source = "prompt"
             close_after_resolution = True
+        elif (
+            issue_state.issue_type
+            and issue_state.follow_up_count >= 3
+            and (not symptom or symptom == "unknown")
+            and not self._looks_like_issue_resolved(transcript)
+        ):
+            route = "handoff_close"
+            objective = "Stop repeated unresolved troubleshooting loops and send link-based guidance."
+            response_source = "prompt"
+            should_hangup = True
         elif issue_type:
             if symptom and symptom != "unknown":
                 route = "rule_guidance"

@@ -215,13 +215,6 @@ LANGUAGE_SWITCH_ONLY_BLOCKLIST = [
     "interest", "fees", "charges", "payment", "bill", "due",
 ]
 
-KNOWN_HINDI_NAME_MAP = {
-    "satish": "सतीश",
-    "sateesh": "सतीश",
-    "sathish": "सतीश",
-}
-
-
 def normalize_language(language: str | None) -> str:
     if language in SUPPORTED_VOICE_LANGUAGES:
         return language
@@ -396,8 +389,8 @@ def build_product_info_follow_up_prompt(language: str = "en-IN") -> str:
 
 def build_human_handoff_reply(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
-        return "इस हिस्से में मैं पक्की जानकारी नहीं दे पा रही हूँ। ज़रूरत हो तो मैं callback का अनुरोध नोट कर सकती हूँ।"
-    return "I am not fully confident about that part. If you want, I can note a callback request."
+        return "मैं आपको एक लिंक भेज रही हूँ, आप फॉर्म को one by one भर दीजिए।"
+    return "I will send you a link, and you can fill the form one by one."
 
 
 def build_empty_input_reply(language: str = "en-IN") -> str:
@@ -487,6 +480,13 @@ def detect_resolution_choice(text: str) -> ResolutionChoice:
         "no",
         "nope",
         "no thanks",
+        "done",
+        "resolved",
+        "ho gaya",
+        "ho gya",
+        "hogaya",
+        "हो गया",
+        "होगया",
         "nothing else",
         "that is all",
         "thats all",
@@ -825,10 +825,12 @@ def _normalize_hindi_name(name: str) -> str:
     clean_name = _normalize_name(name)
     if not clean_name:
         return ""
-    if not _contains_latin_text(clean_name):
-        return clean_name
-    token = clean_name.lower().strip()
-    return KNOWN_HINDI_NAME_MAP.get(token, "")
+    # Use the actual customer-provided name dynamically.
+    # If the name is already in Devanagari, keep it as-is.
+    # If it's in Latin script, keep it readable for TTS rather than dropping it.
+    if _contains_latin_text(clean_name):
+        return " ".join(part.capitalize() for part in clean_name.split())
+    return clean_name
 
 
 def build_user_context(

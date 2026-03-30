@@ -60,6 +60,14 @@ class ConversationEventRead(BaseModel):
     timestamp: datetime
 
 
+class CallStoredEventRead(BaseModel):
+    id: int
+    call_sid: str
+    event_type: str
+    payload: dict = Field(default_factory=dict)
+    timestamp: datetime
+
+
 class WebRTCSessionRead(BaseModel):
     session_id: str
     call_sid: str | None
