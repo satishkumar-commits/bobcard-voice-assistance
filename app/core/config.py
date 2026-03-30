@@ -44,11 +44,14 @@ class Settings(BaseSettings):
     assistant_tts_sentence_max_chars: int = 180
     assistant_stream_flush_timeout_ms: int = 420
     assistant_stream_partial_min_chars: int = 24
+    assistant_stream_force_flush_chars: int = 72
+    assistant_gemini_filler_enabled: bool = True
+    assistant_gemini_filler_delay_ms: int = 1500
     assistant_tts_slow_threshold_ms: int = 4500
     assistant_tts_slow_trigger_count: int = 2
     assistant_tts_slow_mode_seconds: int = 90
     assistant_tts_slow_mode_sentence_max_chars: int = 100
-    tts_static_prompt_warmup: bool = True
+    tts_static_prompt_warmup: bool = False
 
     # Gemini response generation settings.
     gemini_api_key: str = ""
@@ -91,7 +94,7 @@ class Settings(BaseSettings):
     stream_stt_enable_persistent_connection: bool = True
     stream_stt_persistent_finalize_timeout_seconds: float = 1.2
     stream_stt_persistent_finalize_max_messages: int = 3
-    stream_stt_turn_timeout_seconds: float = 10.0
+    stream_stt_turn_timeout_seconds: float = 3.5
     stt_mode: Literal["auto", "rest", "streaming"] = "auto"
     stt_stream_retry_max: int = 1
     stt_stream_backoff_ms: int = 300
@@ -99,8 +102,8 @@ class Settings(BaseSettings):
     empty_transcript_min_chars: int = 3
     barge_in_min_speech_ms: int = 520
     barge_in_cooldown_ms: int = 220
-    stream_barge_in_grace_ms: int = 900
-    stream_barge_in_min_playback_ms: int = 1400
+    stream_barge_in_grace_ms: int = 600
+    stream_barge_in_min_playback_ms: int = 1000
     stream_barge_in_min_speech_ms: int = 760
     stream_utterance_queue_maxsize: int = 2
     tts_cache_max_entries: int = 96

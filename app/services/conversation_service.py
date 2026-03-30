@@ -59,6 +59,8 @@ from app.core.conversation_prompts import (
     build_general_capabilities_reply,
     build_context_setting_prompt,
     build_post_greeting_issue_prompt,
+    build_process_restart_link_reply,
+    build_link_not_received_reply,
     build_language_preference_reprompt,
     build_language_prompt,
     build_language_selected_reply,
@@ -215,7 +217,7 @@ class ConversationService:
             await self._publish_call_status(call)
         await self._set_business_state(call.call_sid, OPENING)
         greeting_text = build_opening_greeting(language=language_code)
-        reply = await self._build_text_turn(call, greeting_text)
+        reply = await self._build_text_turn(call, greeting_text, outcome="opening-greeting")
         await self._set_business_state(call.call_sid, CONSENT_CHECK)
         return reply
 
@@ -238,14 +240,14 @@ class ConversationService:
         customer_name: str = "",
         language: str | None = None,
     ) -> ConversationReply:
-        language_code = "hi-IN"
+        language_code = normalize_language(language or call.language)
         if call.language != language_code:
             call.language = language_code
             await self.session.commit()
             await self._publish_call_status(call)
         await self._set_business_state(call.call_sid, OPENING)
         greeting_text = build_opening_greeting(name=customer_name, language=language_code)
-        reply = await self._build_text_turn(call, greeting_text)
+        reply = await self._build_text_turn(call, greeting_text, outcome="opening-greeting")
         await self._set_business_state(call.call_sid, CONSENT_CHECK)
         return reply
 
@@ -423,7 +425,10 @@ class ConversationService:
         history = await self.get_recent_history(call.id)
         customer_turns = [item for item in history if item["speaker"] == "customer"]
         last_customer_text = customer_turns[-1]["text"] if customer_turns else ""
-        consent_choice = detect_consent_choice(transcript)
+        consent_choice = detect_consent_choice(
+            transcript,
+            current_stage=issue_state.business_state,
+        )
         selected_language = detect_language_preference(transcript)
         response_style = "default"
         self.issue_resolution_service.set_response_style(call.call_sid, response_style)
@@ -702,6 +707,16 @@ class ConversationService:
             )
             return await self._build_text_turn(call, reply_text, outcome="general-capabilities")
 
+        if response_plan["route"] == "link_restart_guidance":
+            await self._set_business_state(call.call_sid, RESOLUTION_ACTION)
+            reply_text = build_process_restart_link_reply(prompt_language)
+            return await self._build_text_turn(call, reply_text, outcome="link-restart-guidance")
+
+        if response_plan["route"] == "link_not_received_guidance":
+            await self._set_business_state(call.call_sid, RESOLUTION_ACTION)
+            reply_text = build_link_not_received_reply(prompt_language)
+            return await self._build_text_turn(call, reply_text, outcome="link-not-received-guidance")
+
         issue_type = response_plan.get("issue_type") or detect_issue_type(transcript)
         if issue_type:
             self.issue_resolution_service.register_issue(call.call_sid, issue_type)
@@ -722,7 +737,12 @@ class ConversationService:
                         on_assistant_sentence=on_assistant_sentence,
                         llm_streaming_enabled=llm_streaming_enabled,
                     )
-                    return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_type}-{symptom}-gemini")
+                    return await self._build_text_turn(
+                        call,
+                        reply_text,
+                        outcome=f"guided-{issue_type}-{symptom}-gemini",
+                        preserve_full_text=True,
+                    )
                 return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_type}-{symptom}")
             if response_plan["route"] == "issue_follow_up":
                 await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
@@ -744,7 +764,12 @@ class ConversationService:
                         on_assistant_sentence=on_assistant_sentence,
                         llm_streaming_enabled=llm_streaming_enabled,
                     )
-                    return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_type}-gemini")
+                    return await self._build_text_turn(
+                        call,
+                        reply_text,
+                        outcome=f"guided-{issue_type}-gemini",
+                        preserve_full_text=True,
+                    )
                 return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_type}")
             if response_plan["route"] == "guided_clarify":
                 await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
@@ -759,7 +784,12 @@ class ConversationService:
                     on_assistant_sentence=on_assistant_sentence,
                     llm_streaming_enabled=llm_streaming_enabled,
                 )
-                return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_type}-clarify")
+                return await self._build_text_turn(
+                    call,
+                    reply_text,
+                    outcome=f"guided-{issue_type}-clarify",
+                    preserve_full_text=True,
+                )
 
         if issue_state.issue_type:
             symptom = response_plan.get("symptom") or detect_issue_symptom(transcript)
@@ -778,7 +808,12 @@ class ConversationService:
                         on_assistant_sentence=on_assistant_sentence,
                         llm_streaming_enabled=llm_streaming_enabled,
                     )
-                    return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_state.issue_type}-clarify")
+                    return await self._build_text_turn(
+                        call,
+                        reply_text,
+                        outcome=f"guided-{issue_state.issue_type}-clarify",
+                        preserve_full_text=True,
+                    )
                 reply_text = build_issue_resolution_reply(issue_state.issue_type, symptom, prompt_language)
                 if response_plan.get("use_gemini"):
                     reply_text = await self._generate_gemini_reply(
@@ -792,7 +827,12 @@ class ConversationService:
                         on_assistant_sentence=on_assistant_sentence,
                         llm_streaming_enabled=llm_streaming_enabled,
                     )
-                    return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_state.issue_type}-{symptom}-gemini")
+                    return await self._build_text_turn(
+                        call,
+                        reply_text,
+                        outcome=f"guided-{issue_state.issue_type}-{symptom}-gemini",
+                        preserve_full_text=True,
+                    )
                 return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_state.issue_type}-{symptom}")
             if response_plan["route"] == "guided_followup":
                 await self._set_business_state(call.call_sid, RESOLUTION_ACTION)
@@ -807,7 +847,12 @@ class ConversationService:
                     on_assistant_sentence=on_assistant_sentence,
                     llm_streaming_enabled=llm_streaming_enabled,
                 )
-                return await self._build_text_turn(call, reply_text, outcome=f"guided-{issue_state.issue_type}-followup")
+                return await self._build_text_turn(
+                    call,
+                    reply_text,
+                    outcome=f"guided-{issue_state.issue_type}-followup",
+                    preserve_full_text=True,
+                )
 
         if response_plan["route"] == "max_turns_handoff":
             await self._set_business_state(call.call_sid, CONFIRMATION_CLOSING)
@@ -851,12 +896,12 @@ class ConversationService:
         noisy_ack = build_noisy_mode_acknowledgement(prompt_language)
         if response_mode == "noisy" and noisy_ack.lower() not in reply_text.lower():
             reply_text = f"{noisy_ack} {reply_text}"
-        reply_text = self._apply_voice_guardrail(
+        reply = await self._build_text_turn(
+            call,
             reply_text,
-            language_code=prompt_language,
-            route=str(response_plan.get("route") or "gemini_response"),
+            outcome="gemini-response",
+            preserve_full_text=True,
         )
-        reply = await self._build_text_turn(call, reply_text)
         await self._publish_speaking(call.call_sid, "assistant", False)
         return reply
 
@@ -896,8 +941,13 @@ class ConversationService:
         text: str,
         should_hangup: bool = False,
         outcome: str | None = None,
+        preserve_full_text: bool = False,
     ) -> ConversationReply:
         max_spoken_chars = max(80, int(self.gemini_service.settings.assistant_tts_max_chars))
+        if outcome == "opening-greeting":
+            max_spoken_chars = max(max_spoken_chars, 360)
+        if preserve_full_text:
+            max_spoken_chars = max(max_spoken_chars, 720)
         language_code = self._prompt_language(call)
         base_text = sanitize_spoken_text(text, max_length=max_spoken_chars)
         response_style = self.issue_resolution_service.get_state(call.call_sid).response_style
@@ -906,9 +956,11 @@ class ConversationService:
             cleaned_text = enforce_devanagari_hindi_reply(styled_text)
         else:
             cleaned_text = sanitize_spoken_text(styled_text, max_length=max_spoken_chars)
-        cleaned_text = self._optimize_voice_reply_for_latency(cleaned_text, language_code=language_code, outcome=outcome)
+        if not preserve_full_text:
+            cleaned_text = self._optimize_voice_reply_for_latency(cleaned_text, language_code=language_code, outcome=outcome)
         cleaned_text = self._normalize_brand_phrase(cleaned_text)
-        cleaned_text = await self._suppress_repetitive_assistant_reply(call, cleaned_text)
+        cleaned_text = await self._suppress_repetitive_assistant_reply(call, cleaned_text, outcome=outcome)
+        cleaned_text = self._ensure_natural_filler_prefix(cleaned_text, language_code=language_code, outcome=outcome)
         logger.info(
             "Latency step=assistant_text_ready call=%s timestamp=%s language=%s text_preview=%s",
             call.call_sid,
@@ -1104,14 +1156,11 @@ class ConversationService:
                 return await self._build_text_turn(call, reply_text, outcome="context-recap")
 
             if consent_choice == "granted":
-                if call.language != "hi-IN":
-                    call.language = "hi-IN"
-                    await self.session.commit()
-                    await self._publish_call_status(call)
+                active_language = self._prompt_language(call)
                 await self._set_business_state(call.call_sid, IDENTITY_VERIFICATION)
                 return await self._build_text_turn(
                     call,
-                    build_identity_verification_prompt(name=forced_customer_name, language="hi-IN"),
+                    build_identity_verification_prompt(name=forced_customer_name, language=active_language),
                 )
 
             if consent_choice == "callback":
@@ -1618,7 +1667,13 @@ class ConversationService:
         normalized = normalized.replace("BOB Cards", "BOB Card")
         return sanitize_spoken_text(normalized)
 
-    async def _suppress_repetitive_assistant_reply(self, call: Call, candidate_text: str) -> str:
+    async def _suppress_repetitive_assistant_reply(
+        self,
+        call: Call,
+        candidate_text: str,
+        *,
+        outcome: str | None = None,
+    ) -> str:
         if not candidate_text.strip():
             return candidate_text
 
@@ -1628,6 +1683,8 @@ class ConversationService:
             return candidate_text
 
         business_state = self.issue_resolution_service.get_state(call.call_sid).business_state
+        if outcome == "escalation-requested" or business_state == CONFIRMATION_CLOSING:
+            return candidate_text
         if business_state == RESOLUTION_ACTION:
             return candidate_text
         guidance_states = {ISSUE_CAPTURE, RESOLUTION_ACTION}
@@ -1765,10 +1822,14 @@ class ConversationService:
             return text
 
         max_chars = 170
+        if outcome == "opening-greeting":
+            max_chars = 340
         if outcome in {"resolution-complete", "issue-resolved", "customer-ended", "general-capabilities"}:
             max_chars = 125
 
         sentence_limit = 2
+        if outcome == "opening-greeting":
+            sentence_limit = 5
         if outcome in {"resolution-complete", "issue-resolved", "customer-ended"}:
             sentence_limit = 1
 
@@ -1781,6 +1842,39 @@ class ConversationService:
             trimmed = cleaned
 
         return sanitize_spoken_text(trimmed, max_length=max_chars)
+
+    @staticmethod
+    def _ensure_natural_filler_prefix(text: str, *, language_code: str, outcome: str | None) -> str:
+        if normalize_language(language_code) != "hi-IN":
+            return text
+        if outcome in {"opening-greeting", "callback-requested", "sms-link-requested", "opted-out", "customer-ended"}:
+            return text
+        cleaned = sanitize_spoken_text(text).strip()
+        if not cleaned:
+            return text
+        normalized = normalize_issue_text(cleaned)
+        starters = ("जी", "ठीक", "माफ़", "धन्यवाद", "नमस्ते", "sorry")
+        if normalized.startswith(("ji", "theek", "thik", "maaf", "dhany", "namaste", "sorry")):
+            return cleaned
+        if any(cleaned.startswith(prefix) for prefix in starters):
+            return cleaned
+        return f"जी, {cleaned}"
+
+    @staticmethod
+    def _enforce_short_burst_limit(text: str, *, language_code: str, outcome: str | None) -> str:
+        if outcome == "opening-greeting":
+            return text
+        cleaned = sanitize_spoken_text(text).strip()
+        if not cleaned:
+            return text
+        words = re.findall(r"\S+", cleaned)
+        max_words = 10
+        if len(words) <= max_words:
+            return cleaned
+        trimmed = " ".join(words[:max_words]).strip()
+        if trimmed and trimmed[-1] not in {"।", ".", "!", "?"}:
+            trimmed = f"{trimmed}{'।' if normalize_language(language_code) == 'hi-IN' else '.'}"
+        return trimmed
 
     @staticmethod
     def _should_auto_detect_language(
@@ -1897,12 +1991,20 @@ class ConversationService:
         await self._publish_call_phase(call_sid, GEMINI_REQUESTED)
         stream_buffer = ""
         streamed_sentence_count = 0
+        first_model_sentence_emitted = False
         last_assistant_text = ""
         sentence_max_chars = max(80, int(self.gemini_service.settings.assistant_tts_sentence_max_chars))
         flush_timeout_ms = max(180, int(self.gemini_service.settings.assistant_stream_flush_timeout_ms))
         partial_min_chars = max(8, int(self.gemini_service.settings.assistant_stream_partial_min_chars))
+        force_flush_chars = max(
+            partial_min_chars + 8,
+            int(self.gemini_service.settings.assistant_stream_force_flush_chars),
+        )
+        filler_enabled = bool(self.gemini_service.settings.assistant_gemini_filler_enabled)
+        filler_delay_ms = max(200, int(self.gemini_service.settings.assistant_gemini_filler_delay_ms))
         stream_buffer_lock = asyncio.Lock()
         stream_flush_task: asyncio.Task | None = None
+        filler_task: asyncio.Task | None = None
         for item in reversed(history):
             if item.get("speaker") == "assistant" and item.get("text"):
                 last_assistant_text = item["text"]
@@ -1948,24 +2050,47 @@ class ConversationService:
                 partial = f"{partial}{'।' if language_code == 'hi-IN' else '.'}"
             await _emit_sentence(partial, reason)
 
+        async def _schedule_latency_filler() -> None:
+            if on_assistant_sentence is None or not filler_enabled:
+                return
+            await asyncio.sleep(filler_delay_ms / 1000)
+            if first_model_sentence_emitted:
+                return
+            filler_text = self._gemini_thinking_filler(language_code)
+            await _emit_sentence(filler_text, reason="filler_wait")
+
         async def _schedule_partial_flush() -> None:
             await asyncio.sleep(flush_timeout_ms / 1000)
             await _flush_partial_buffer(reason="timeout")
 
         async def on_stream_chunk(chunk: str) -> None:
-            nonlocal stream_buffer, stream_flush_task
+            nonlocal stream_buffer, stream_flush_task, first_model_sentence_emitted
             if on_assistant_sentence is None:
                 return
             if not chunk:
                 return
+            forced_partial = ""
             async with stream_buffer_lock:
                 stream_buffer += chunk
                 sentences, stream_buffer = self._extract_completed_sentences(stream_buffer)
+                if not sentences:
+                    forced_partial, stream_buffer = self._split_stream_buffer_for_early_emit(
+                        stream_buffer,
+                        force_flush_chars,
+                    )
             for sentence in sentences:
                 cleaned_sentence = sanitize_spoken_text(sentence, max_length=sentence_max_chars)
                 if not cleaned_sentence:
                     continue
+                first_model_sentence_emitted = True
                 await _emit_sentence(cleaned_sentence, reason="punct")
+            if forced_partial:
+                cleaned_sentence = sanitize_spoken_text(forced_partial, max_length=sentence_max_chars)
+                if cleaned_sentence:
+                    first_model_sentence_emitted = True
+                    if cleaned_sentence[-1] not in {"।", ".", "!", "?"}:
+                        cleaned_sentence = f"{cleaned_sentence}{'।' if language_code == 'hi-IN' else '.'}"
+                    await _emit_sentence(cleaned_sentence, reason="force_flush")
             if stream_flush_task and not stream_flush_task.done():
                 stream_flush_task.cancel()
             if stream_buffer.strip():
@@ -1974,27 +2099,38 @@ class ConversationService:
                 stream_flush_task = None
 
         use_streaming = self.gemini_service.settings.llm_streaming if llm_streaming_enabled is None else llm_streaming_enabled
-        if use_streaming:
-            decision = await self.gemini_service.generate_reply_decision_streaming(
-                history=history,
-                latest_user_text=latest_user_text,
-                response_mode=response_mode,
-                language_code=language_code,
-                response_style=response_style,
-                active_issue_type=active_issue_type,
-                call_sid=call_sid,
-                on_text_chunk=on_stream_chunk if on_assistant_sentence is not None else None,
-            )
-        else:
-            decision = await self.gemini_service.generate_reply_decision(
-                history=history,
-                latest_user_text=latest_user_text,
-                response_mode=response_mode,
-                language_code=language_code,
-                response_style=response_style,
-                active_issue_type=active_issue_type,
-                call_sid=call_sid,
-            )
+        if on_assistant_sentence is not None:
+            use_streaming = True
+        if use_streaming and on_assistant_sentence is not None and filler_enabled:
+            filler_task = asyncio.create_task(_schedule_latency_filler())
+
+        try:
+            if use_streaming:
+                decision = await self.gemini_service.generate_reply_decision_streaming(
+                    history=history,
+                    latest_user_text=latest_user_text,
+                    response_mode=response_mode,
+                    language_code=language_code,
+                    response_style=response_style,
+                    active_issue_type=active_issue_type,
+                    call_sid=call_sid,
+                    on_text_chunk=on_stream_chunk if on_assistant_sentence is not None else None,
+                )
+            else:
+                decision = await self.gemini_service.generate_reply_decision(
+                    history=history,
+                    latest_user_text=latest_user_text,
+                    response_mode=response_mode,
+                    language_code=language_code,
+                    response_style=response_style,
+                    active_issue_type=active_issue_type,
+                    call_sid=call_sid,
+                )
+        finally:
+            if filler_task and not filler_task.done():
+                filler_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await filler_task
 
         if on_assistant_sentence is not None and not decision.used_fallback:
             if use_streaming:
@@ -2004,6 +2140,7 @@ class ConversationService:
                         await stream_flush_task
                 trailing = sanitize_spoken_text(stream_buffer.strip(), max_length=sentence_max_chars)
                 if trailing:
+                    first_model_sentence_emitted = True
                     await _emit_sentence(trailing, reason="trailing")
             else:
                 full_text = sanitize_spoken_text(decision.text, max_length=sentence_max_chars * 3)
@@ -2017,6 +2154,7 @@ class ConversationService:
                     for raw_sentence in sentence_parts:
                         cleaned_sentence = sanitize_spoken_text(raw_sentence, max_length=sentence_max_chars)
                         if cleaned_sentence:
+                            first_model_sentence_emitted = True
                             await _emit_sentence(cleaned_sentence, reason="non_stream")
 
         await self._publish_gemini_decision(call_sid, self._serialize_gemini_decision(decision))
@@ -2025,6 +2163,26 @@ class ConversationService:
             GEMINI_FALLBACK_USED if decision.used_fallback else GEMINI_REPLY_READY,
         )
         return decision.text
+
+    @staticmethod
+    def _gemini_thinking_filler(language_code: str) -> str:
+        if normalize_language(language_code) == "hi-IN":
+            return "जी, मैं चेक कर रही हूँ।"
+        return "Sure, I am checking this now."
+
+    @staticmethod
+    def _split_stream_buffer_for_early_emit(buffer: str, max_chars: int) -> tuple[str, str]:
+        compact = sanitize_spoken_text(buffer)
+        if len(compact) < max_chars:
+            return "", compact
+        split_at = compact.rfind(" ", 0, max_chars + 1)
+        if split_at <= 0:
+            split_at = max_chars
+        emit_text = compact[:split_at].strip()
+        remaining = compact[split_at:].strip()
+        if not emit_text:
+            return "", compact
+        return emit_text, remaining
 
     @staticmethod
     def _extract_completed_sentences(buffer: str) -> tuple[list[str], str]:
@@ -2292,6 +2450,19 @@ class ConversationService:
             objective = "Answer product or service information queries with concise options."
             response_source = "prompt"
             use_gemini = False
+        elif (
+            issue_state.business_state in {CONTEXT_SETTING, ISSUE_CAPTURE, RESOLUTION_ACTION}
+            and self._looks_like_link_share_request(transcript)
+        ):
+            route = "link_restart_guidance"
+            objective = "Acknowledge link request and offer process restart via shared link."
+            response_source = "prompt"
+            use_gemini = False
+        elif self._looks_like_link_not_received(transcript):
+            route = "link_not_received_guidance"
+            objective = "Apologize and offer immediate SMS link resend without asking identity again."
+            response_source = "prompt"
+            use_gemini = False
         elif primary_intent == "general_query" and self._looks_like_capability_query(transcript):
             route = "general_capabilities"
             objective = "Answer product capability query directly instead of generic fallback."
@@ -2309,7 +2480,7 @@ class ConversationService:
             and not self._looks_like_issue_resolved(transcript)
         ):
             route = "handoff_close"
-            objective = "Stop repeated unresolved troubleshooting loops and send link-based guidance."
+            objective = "Stop repeated unresolved troubleshooting loops and connect the caller to a human agent."
             response_source = "prompt"
             should_hangup = True
         elif issue_type:
@@ -2377,7 +2548,7 @@ class ConversationService:
 
     @staticmethod
     def _prompt_language(call: Call) -> str:
-        return "hi-IN"
+        return normalize_language(call.language)
 
     @staticmethod
     def _looks_like_explicit_issue_switch(text: str) -> bool:
@@ -2395,6 +2566,72 @@ class ConversationService:
             "instead",
         )
         return any(marker in normalized for marker in switch_markers)
+
+    @staticmethod
+    def _looks_like_link_share_request(text: str) -> bool:
+        normalized = normalize_issue_text(text)
+        if not normalized:
+            return False
+        link_markers = (
+            "link",
+            "sms",
+            "message",
+            "msg",
+            "लिंक",
+            "मैसेज",
+            "संदेश",
+        )
+        request_markers = (
+            "send",
+            "share",
+            "bhej",
+            "bejh",
+            "de do",
+            "please",
+            "भेज",
+            "शेयर",
+            "दे दो",
+            "दे दीजिए",
+        )
+        restart_markers = (
+            "again",
+            "restart",
+            "start again",
+            "fir se",
+            "phir se",
+            "dobara",
+            "दोबारा",
+            "फिर से",
+        )
+        has_link_marker = any(marker in normalized for marker in link_markers)
+        has_request_marker = any(marker in normalized for marker in request_markers)
+        has_restart_marker = any(marker in normalized for marker in restart_markers)
+        return has_link_marker and (has_request_marker or has_restart_marker)
+
+    @staticmethod
+    def _looks_like_link_not_received(text: str) -> bool:
+        normalized = normalize_issue_text(text)
+        if not normalized:
+            return False
+        link_markers = ("link", "sms", "message", "msg", "लिंक", "मैसेज", "संदेश")
+        miss_markers = (
+            "not received",
+            "not recieve",
+            "did not receive",
+            "not found",
+            "nahi mila",
+            "nhi mila",
+            "नहीं मिला",
+            "नही मिला",
+            "नहीं आया",
+            "नही आया",
+            "missing",
+            "open nahi",
+            "open नहीं",
+        )
+        has_link = any(marker in normalized for marker in link_markers)
+        has_missing = any(marker in normalized for marker in miss_markers)
+        return has_link and has_missing
 
     @staticmethod
     def _apply_voice_guardrail(text: str, *, language_code: str, route: str) -> str:

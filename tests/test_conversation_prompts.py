@@ -4,6 +4,7 @@ from app.core.conversation_prompts import (
     build_general_capabilities_reply,
     build_human_handoff_reply,
     build_opening_greeting,
+    build_process_restart_link_reply,
     detect_consent_choice,
     detect_escalation_request,
     detect_language_preference,
@@ -23,6 +24,10 @@ class ConversationPromptsTests(unittest.TestCase):
     def test_detects_opt_out(self) -> None:
         self.assertEqual(detect_consent_choice("Please do not call me"), "opt_out")
 
+    def test_no_maps_to_callback_only_in_consent_stage(self) -> None:
+        self.assertEqual(detect_consent_choice("नहीं", current_stage="consent_check"), "callback")
+        self.assertEqual(detect_consent_choice("नहीं", current_stage="identity_verification"), "unknown")
+
     def test_goodbye_detection(self) -> None:
         self.assertTrue(wants_goodbye("thanks bye"))
         self.assertFalse(wants_goodbye("this is a notebook issue"))
@@ -38,6 +43,8 @@ class ConversationPromptsTests(unittest.TestCase):
         greeting = build_opening_greeting(name="Satish", language="en-IN", agent_name="Maya")
         self.assertIn("Bank of Baroda", greeting)
         self.assertIn("BOBCards", greeting)
+        self.assertIn("incomplete", greeting)
+        self.assertIn("help you complete it", greeting)
 
     def test_general_capabilities_supports_style_selection(self) -> None:
         first = build_general_capabilities_reply("hi-IN", response_style="default")
@@ -52,16 +59,28 @@ class ConversationPromptsTests(unittest.TestCase):
         self.assertIn("BOB Card", text)
         self.assertIn("application", text)
 
-    def test_handoff_reply_mentions_link_guidance(self) -> None:
+    def test_hindi_opening_includes_recording_disclosure(self) -> None:
+        greeting = build_opening_greeting(language="hi-IN", agent_name="माया")
+        self.assertIn("रिकॉर्ड", greeting)
+        self.assertIn("एआई वॉइस सहायक", greeting)
+        self.assertIn("आवेदन", greeting)
+        self.assertIn("अधूरा", greeting)
+
+    def test_handoff_reply_connects_human_agent(self) -> None:
         reply = build_human_handoff_reply("hi-IN")
-        self.assertIn("लिंक", reply)
-        self.assertIn("one by one", reply)
+        self.assertIn("मानव एजेंट", reply)
+        self.assertNotIn("लिंक", reply)
 
     def test_resolution_choice_detects_hindi_done_phrase(self) -> None:
         self.assertEqual(detect_resolution_choice("हो गया"), "no_more_help")
 
     def test_short_valid_intent_detects_hindi_done_phrase(self) -> None:
         self.assertTrue(is_short_valid_intent("हो गया"))
+
+    def test_restart_link_reply_prompt(self) -> None:
+        reply = build_process_restart_link_reply("hi-IN")
+        self.assertIn("लिंक", reply)
+        self.assertIn("फिर से", reply)
 
 
 if __name__ == "__main__":
