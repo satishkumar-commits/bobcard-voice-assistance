@@ -20,6 +20,26 @@ IssueType = Literal[
     "login_issue",
     "application_status_issue",
     "generic_process_help",
+    "personal_details_mismatch",
+    "max_attempts_exceeded",
+    "age_ineligible",
+    "technical_error",
+    "aadhaar_pan_not_linked",
+    "aadhaar_hindi_not_supported",
+    "aadhaar_reverify",
+    "aadhaar_verification_failure",
+    "retry_after_30_days",
+    "vkyc_pending",
+    "vkyc_expired",
+    "offer_eligible_no_docs",
+    "bank_statement_required",
+    "bank_not_found_manual_upload",
+    "salaried_only",
+    "card_selection_required",
+    "e_consent_step",
+    "vkyc_instructions",
+    "application_complete",
+    "resume_journey",
 ]
 
 IssueSymptom = Literal[
@@ -52,6 +72,20 @@ _ACK_CHOICES = {
     "ji",
     "ok",
     "okay",
+    "ठीक है",
+    "थीक है",
+    "theek hai",
+    "thik hai",
+    "जी बताइए",
+    "ji batayiye",
+    "ji bataiye",
+    "hello",
+    "हलो",
+    "हेलो",
+    "बोलिए",
+    "bolo",
+    "boliye",
+    "speaking",
 }
 
 _GREETING_CHOICES = {
@@ -62,6 +96,37 @@ _GREETING_CHOICES = {
     "नमस्ते",
     "hello ji",
     "hi ji",
+    "हलो",
+    "हेलो",
+    "बोलिए",
+    "bolo",
+    "speaking",
+}
+
+_LOW_CONTENT_VALID_CHOICES = {
+    "हाँ",
+    "हां",
+    "हाँ जी",
+    "हां जी",
+    "जी",
+    "जी हाँ",
+    "जी हां",
+    "hello",
+    "हलो",
+    "हेलो",
+    "yes",
+    "yes ji",
+    "speaking",
+    "ठीक है",
+    "थीक है",
+    "theek hai",
+    "thik hai",
+    "जी बताइए",
+    "ji batayiye",
+    "ji bataiye",
+    "bolo",
+    "boliye",
+    "बोलिए",
 }
 
 _FRUSTRATION_KEYWORDS = (
@@ -190,13 +255,28 @@ def is_simple_acknowledgement(text: str) -> bool:
         return False
     if normalized in _ACK_CHOICES:
         return True
+    if normalized in _LOW_CONTENT_VALID_CHOICES:
+        return True
+    if any(normalized.startswith(f"{choice} ") for choice in _LOW_CONTENT_VALID_CHOICES):
+        return True
 
     tokens = normalized.split()
     if not tokens:
         return False
 
-    allowed_tokens = {"haan", "ji", "yes", "ok", "okay", "हाँ", "जी", "हां"}
+    allowed_tokens = {"haan", "ji", "yes", "ok", "okay", "हाँ", "जी", "हां", "hello", "speaking", "bolo", "boliye"}
     return len(tokens) <= 6 and all(token in allowed_tokens for token in tokens)
+
+
+def is_valid_low_content_turn(text: str) -> bool:
+    normalized = normalize_issue_text(text)
+    if not normalized:
+        return False
+    if normalized in _LOW_CONTENT_VALID_CHOICES:
+        return True
+    if any(normalized.startswith(f"{choice} ") for choice in _LOW_CONTENT_VALID_CHOICES):
+        return True
+    return is_simple_acknowledgement(normalized) or is_opening_response(normalized)
 
 
 def is_opening_response(text: str) -> bool:
@@ -245,6 +325,47 @@ def detect_issue_type(text: str) -> IssueType | None:
     normalized = normalize_issue_text(text)
     if not normalized:
         return None
+
+    if _contains_any(normalized, ("already has bob card", "already have bob card", "application rejected", "try again after 30 days", "30 day", "30 days")):
+        return "retry_after_30_days"
+    if _contains_any(normalized, ("pan dob mismatch", "pan and dob do not match", "dob mismatch", "date of birth mismatch")):
+        return "personal_details_mismatch"
+    if _contains_any(normalized, ("max attempts", "maximum attempts", "too many attempts", "24 hours")):
+        return "max_attempts_exceeded"
+    if _contains_any(normalized, ("minimum age 25", "age below 25", "not eligible by age", "age ineligible")):
+        return "age_ineligible"
+    if _contains_any(normalized, ("technical issue", "system issue", "api failure", "service unavailable", "temporarily unavailable")):
+        return "technical_error"
+    if _contains_any(normalized, ("aadhaar not linked", "aadhaar pan not linked", "link aadhaar with pan", "aadhaar pan link")):
+        return "aadhaar_pan_not_linked"
+    if _contains_any(normalized, ("aadhaar hindi not supported", "hindi not supported for aadhaar", "continue in english")):
+        return "aadhaar_hindi_not_supported"
+    if _contains_any(normalized, ("reverify aadhaar", "aadhaar reverify", "verify again", "re verification")):
+        return "aadhaar_reverify"
+    if _contains_any(normalized, ("uidai error", "aadhaar verification failed", "verification could not be completed")):
+        return "aadhaar_verification_failure"
+    if _contains_any(normalized, ("video kyc pending", "complete video kyc within 72 hours", "72 hours rule")):
+        return "vkyc_pending"
+    if _contains_any(normalized, ("video kyc expired", "vkyc expired", "72 hours expired", "restart application")):
+        return "vkyc_expired"
+    if _contains_any(normalized, ("eligible without documents", "no additional documents", "offer eligible")):
+        return "offer_eligible_no_docs"
+    if _contains_any(normalized, ("bank statement required", "need bank statement", "upload statement", "net banking")):
+        return "bank_statement_required"
+    if _contains_any(normalized, ("bank not listed", "bank not found", "manual upload")):
+        return "bank_not_found_manual_upload"
+    if _contains_any(normalized, ("salaried only", "only salaried")):
+        return "salaried_only"
+    if _contains_any(normalized, ("choose card option", "card selection", "select card")):
+        return "card_selection_required"
+    if _contains_any(normalized, ("e consent", "swipe right to proceed", "review details and swipe")):
+        return "e_consent_step"
+    if _contains_any(normalized, ("video kyc instructions", "original pan card ready", "plain light background", "allow location access")):
+        return "vkyc_instructions"
+    if _contains_any(normalized, ("application complete", "process complete", "thank you for choosing bank of baroda")):
+        return "application_complete"
+    if _contains_any(normalized, ("welcome back", "resume journey", "continue from where you left off")):
+        return "resume_journey"
 
     if _contains_any(normalized, ("aadhaar", "aadhar", "आधार")):
         return "aadhaar_upload"
@@ -319,6 +440,26 @@ def build_issue_help_reply(issue_type: IssueType, language: str = "en-IN") -> st
             "application_status_issue": "ठीक है। ट्रैकिंग पेज रीफ्रेश करके स्थिति फिर देखिए।",
             "document_upload": "समझ गई। दस्तावेज़ की साफ़ कॉपी चुनकर दोबारा अपलोड कीजिए।",
             "generic_process_help": "ठीक है। आप किस चरण पर रुके हैं, बस वही बताइए।",
+            "retry_after_30_days": "अभी आपका आवेदन आगे नहीं बढ़ सकता। कृपया 30 दिन बाद फिर प्रयास करें।",
+            "personal_details_mismatch": "आपका PAN और जन्मतिथि रिकॉर्ड से मेल नहीं खा रहे। कृपया जाँचकर फिर प्रयास करें।",
+            "max_attempts_exceeded": "आपके अधिकतम प्रयास पूरे हो चुके हैं। कृपया 24 घंटे बाद फिर कोशिश करें।",
+            "age_ineligible": "न्यूनतम पात्र आयु 25 वर्ष है। अभी आप पात्र नहीं हैं।",
+            "technical_error": "अभी सिस्टम में तकनीकी समस्या है। कृपया थोड़ी देर बाद फिर प्रयास करें।",
+            "aadhaar_pan_not_linked": "आपका Aadhaar, PAN से लिंक नहीं है। कृपया लिंक करके फिर प्रयास करें।",
+            "aadhaar_hindi_not_supported": "अभी Aadhaar verification हिंदी में उपलब्ध नहीं है। कृपया English में जारी रखें।",
+            "aadhaar_reverify": "कृपया Aadhaar और PAN लिंक सही करके verification फिर से करें।",
+            "aadhaar_verification_failure": "सिस्टम समस्या के कारण verification पूरा नहीं हो पाया। कृपया फिर कोशिश करें।",
+            "vkyc_pending": "Aadhaar verification के बाद video KYC 72 घंटे में पूरा करें।",
+            "vkyc_expired": "Video KYC समय पर पूरा नहीं हुआ। कृपया आवेदन फिर से शुरू करें।",
+            "offer_eligible_no_docs": "अच्छी खबर, आप बिना अतिरिक्त दस्तावेज़ के offer के लिए पात्र हैं।",
+            "bank_statement_required": "आगे बढ़ने के लिए bank statement चाहिए। net banking या manual upload चुनें।",
+            "bank_not_found_manual_upload": "अगर bank सूची में नहीं है तो statement manual upload करें।",
+            "salaried_only": "अभी यह प्रक्रिया केवल salaried customers के लिए उपलब्ध है।",
+            "card_selection_required": "कृपया आगे बढ़ने के लिए एक card विकल्प चुनें।",
+            "e_consent_step": "कृपया विवरण देखकर swipe right करें।",
+            "vkyc_instructions": "Video KYC के लिए original PAN रखें, location on करें और plain background में बैठें।",
+            "application_complete": "आपकी application प्रक्रिया पूरी हो गई है। धन्यवाद।",
+            "resume_journey": "Welcome back। आप अपनी application वहीं से जारी कर सकते हैं जहाँ रुकी थी।",
         }
         return replies[issue_type]
 
@@ -338,6 +479,26 @@ def build_issue_help_reply(issue_type: IssueType, language: str = "en-IN") -> st
         "application_status_issue": "Please refresh the tracking page and check status again.",
         "document_upload": "Please select a clear document image or PDF and upload again.",
         "generic_process_help": "Understood. Tell me the exact step where you are stuck.",
+        "retry_after_30_days": "Sorry sir, at the moment we are unable to proceed with your application. You may try again after 30 days.",
+        "personal_details_mismatch": "Sorry sir, your PAN and date of birth do not match our records. Please check and try again.",
+        "max_attempts_exceeded": "You have reached the maximum number of attempts. Please try again after 24 hours.",
+        "age_ineligible": "As per Bank of Baroda policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria.",
+        "technical_error": "We are facing a technical issue at the moment. Kindly try again after some time and restart your journey.",
+        "aadhaar_pan_not_linked": "We regret to inform you that your Aadhaar is not linked with your PAN card. Please link it and try again.",
+        "aadhaar_hindi_not_supported": "Currently, Aadhaar verification is not available in Hindi. Please continue in English.",
+        "aadhaar_reverify": "Please ensure your Aadhaar and PAN are linked correctly, then try the verification again.",
+        "aadhaar_verification_failure": "Sorry, verification could not be completed due to a system issue. Please try again to continue the process.",
+        "vkyc_pending": "After Aadhaar verification, please complete your video KYC within 72 hours.",
+        "vkyc_expired": "Your application could not be completed because video KYC was not finished within 72 hours. Please restart the application to continue.",
+        "offer_eligible_no_docs": "Good news, you are eligible for card offers without additional documents.",
+        "bank_statement_required": "To continue, we need your bank statement. You can proceed through net banking or upload your statement manually.",
+        "bank_not_found_manual_upload": "If your bank is not listed, you can upload your bank statement manually.",
+        "salaried_only": "Currently, this process is available only for salaried customers.",
+        "card_selection_required": "Please choose one of the available card options to continue.",
+        "e_consent_step": "Please review the details and swipe right to proceed.",
+        "vkyc_instructions": "For video KYC, please keep your original PAN card ready, allow location access, and sit in front of a plain light background.",
+        "application_complete": "Your application process is complete. Thank you for choosing Bank of Baroda.",
+        "resume_journey": "Welcome back. You can continue your application from where you left off.",
     }
     return replies[issue_type]
 
@@ -558,8 +719,109 @@ def build_issue_follow_up_question(
                 "ठीक है। उस चरण पर स्क्रीन में क्या लिखा आ रहा है?",
                 "क्या आप वही लाइन शब्दों में पढ़कर बता सकते हैं?",
             ),
+            "retry_after_30_days": (
+                "अभी आवेदन आगे नहीं बढ़ सकता। कृपया 30 दिन बाद प्रयास करें।",
+                "अभी आवेदन आगे नहीं बढ़ सकता। कृपया 30 दिन बाद प्रयास करें।",
+                "अभी आवेदन आगे नहीं बढ़ सकता। कृपया 30 दिन बाद प्रयास करें।",
+            ),
+            "personal_details_mismatch": (
+                "PAN और DOB रिकॉर्ड से मेल नहीं खा रहे। कृपया जाँचकर फिर प्रयास करें।",
+                "PAN और DOB रिकॉर्ड से मेल नहीं खा रहे। कृपया जाँचकर फिर प्रयास करें।",
+                "PAN और DOB रिकॉर्ड से मेल नहीं खा रहे। कृपया जाँचकर फिर प्रयास करें।",
+            ),
+            "max_attempts_exceeded": (
+                "अधिकतम प्रयास पूरे हो गए हैं। कृपया 24 घंटे बाद फिर कोशिश करें।",
+                "अधिकतम प्रयास पूरे हो गए हैं। कृपया 24 घंटे बाद फिर कोशिश करें।",
+                "अधिकतम प्रयास पूरे हो गए हैं। कृपया 24 घंटे बाद फिर कोशिश करें।",
+            ),
+            "age_ineligible": (
+                "न्यूनतम पात्र आयु 25 वर्ष है। अभी आप पात्र नहीं हैं।",
+                "न्यूनतम पात्र आयु 25 वर्ष है। अभी आप पात्र नहीं हैं।",
+                "न्यूनतम पात्र आयु 25 वर्ष है। अभी आप पात्र नहीं हैं।",
+            ),
+            "technical_error": (
+                "अभी तकनीकी समस्या है। कृपया थोड़ी देर बाद फिर प्रयास करें।",
+                "अभी तकनीकी समस्या है। कृपया थोड़ी देर बाद फिर प्रयास करें।",
+                "अभी तकनीकी समस्या है। कृपया थोड़ी देर बाद फिर प्रयास करें।",
+            ),
+            "aadhaar_pan_not_linked": (
+                "Aadhaar PAN से लिंक नहीं है। कृपया लिंक करके फिर प्रयास करें।",
+                "Aadhaar PAN से लिंक नहीं है। कृपया लिंक करके फिर प्रयास करें।",
+                "Aadhaar PAN से लिंक नहीं है। कृपया लिंक करके फिर प्रयास करें।",
+            ),
+            "aadhaar_hindi_not_supported": (
+                "Aadhaar verification हिंदी में उपलब्ध नहीं है। कृपया English में जारी रखें।",
+                "Aadhaar verification हिंदी में उपलब्ध नहीं है। कृपया English में जारी रखें।",
+                "Aadhaar verification हिंदी में उपलब्ध नहीं है। कृपया English में जारी रखें।",
+            ),
+            "aadhaar_reverify": (
+                "कृपया Aadhaar और PAN लिंक सही करके verification फिर करें।",
+                "कृपया Aadhaar और PAN लिंक सही करके verification फिर करें।",
+                "कृपया Aadhaar और PAN लिंक सही करके verification फिर करें।",
+            ),
+            "aadhaar_verification_failure": (
+                "Verification सिस्टम समस्या से पूरा नहीं हुआ। कृपया फिर प्रयास करें।",
+                "Verification सिस्टम समस्या से पूरा नहीं हुआ। कृपया फिर प्रयास करें।",
+                "Verification सिस्टम समस्या से पूरा नहीं हुआ। कृपया फिर प्रयास करें।",
+            ),
+            "vkyc_pending": (
+                "Aadhaar verification के बाद 72 घंटे में video KYC पूरा करें।",
+                "Aadhaar verification के बाद 72 घंटे में video KYC पूरा करें।",
+                "Aadhaar verification के बाद 72 घंटे में video KYC पूरा करें।",
+            ),
+            "vkyc_expired": (
+                "Video KYC समय पर पूरा नहीं हुआ। कृपया आवेदन फिर शुरू करें।",
+                "Video KYC समय पर पूरा नहीं हुआ। कृपया आवेदन फिर शुरू करें।",
+                "Video KYC समय पर पूरा नहीं हुआ। कृपया आवेदन फिर शुरू करें।",
+            ),
+            "offer_eligible_no_docs": (
+                "अच्छी खबर, आप बिना अतिरिक्त दस्तावेज़ के पात्र हैं।",
+                "अच्छी खबर, आप बिना अतिरिक्त दस्तावेज़ के पात्र हैं।",
+                "अच्छी खबर, आप बिना अतिरिक्त दस्तावेज़ के पात्र हैं।",
+            ),
+            "bank_statement_required": (
+                "आगे बढ़ने के लिए bank statement चाहिए। net banking या manual upload चुनें।",
+                "आगे बढ़ने के लिए bank statement चाहिए। net banking या manual upload चुनें।",
+                "आगे बढ़ने के लिए bank statement चाहिए। net banking या manual upload चुनें।",
+            ),
+            "bank_not_found_manual_upload": (
+                "अगर bank सूची में नहीं है तो manual upload करें।",
+                "अगर bank सूची में नहीं है तो manual upload करें।",
+                "अगर bank सूची में नहीं है तो manual upload करें।",
+            ),
+            "salaried_only": (
+                "अभी यह प्रक्रिया केवल salaried customers के लिए उपलब्ध है।",
+                "अभी यह प्रक्रिया केवल salaried customers के लिए उपलब्ध है।",
+                "अभी यह प्रक्रिया केवल salaried customers के लिए उपलब्ध है।",
+            ),
+            "card_selection_required": (
+                "कृपया आगे बढ़ने के लिए एक card विकल्प चुनें।",
+                "कृपया आगे बढ़ने के लिए एक card विकल्प चुनें।",
+                "कृपया आगे बढ़ने के लिए एक card विकल्प चुनें।",
+            ),
+            "e_consent_step": (
+                "कृपया विवरण देखकर swipe right करें।",
+                "कृपया विवरण देखकर swipe right करें।",
+                "कृपया विवरण देखकर swipe right करें।",
+            ),
+            "vkyc_instructions": (
+                "Video KYC के लिए PAN रखें, location allow करें और plain background में बैठें।",
+                "Video KYC के लिए PAN रखें, location allow करें और plain background में बैठें।",
+                "Video KYC के लिए PAN रखें, location allow करें और plain background में बैठें।",
+            ),
+            "application_complete": (
+                "आपकी application प्रक्रिया पूरी हो गई है। धन्यवाद।",
+                "आपकी application प्रक्रिया पूरी हो गई है। धन्यवाद।",
+                "आपकी application प्रक्रिया पूरी हो गई है। धन्यवाद।",
+            ),
+            "resume_journey": (
+                "Welcome back। आप अपनी application वहीं से जारी कर सकते हैं जहाँ रुकी थी।",
+                "Welcome back। आप अपनी application वहीं से जारी कर सकते हैं जहाँ रुकी थी।",
+                "Welcome back। आप अपनी application वहीं से जारी कर सकते हैं जहाँ रुकी थी।",
+            ),
         }
-        return prompts[issue_type][stage_index]
+        selected_prompts = prompts.get(issue_type, prompts["generic_process_help"])
+        return selected_prompts[stage_index]
 
     prompts = {
         "aadhaar_upload": (
@@ -637,8 +899,109 @@ def build_issue_follow_up_question(
             "Okay. What text is visible on that screen?",
             "Can you read the same line shown there?",
         ),
+        "retry_after_30_days": (
+            "Sorry sir, at the moment we are unable to proceed with your application. You may try again after 30 days.",
+            "Sorry sir, at the moment we are unable to proceed with your application. You may try again after 30 days.",
+            "Sorry sir, at the moment we are unable to proceed with your application. You may try again after 30 days.",
+        ),
+        "personal_details_mismatch": (
+            "Sorry sir, your PAN and date of birth do not match our records. Please check and try again.",
+            "Sorry sir, your PAN and date of birth do not match our records. Please check and try again.",
+            "Sorry sir, your PAN and date of birth do not match our records. Please check and try again.",
+        ),
+        "max_attempts_exceeded": (
+            "You have reached the maximum number of attempts. Please try again after 24 hours.",
+            "You have reached the maximum number of attempts. Please try again after 24 hours.",
+            "You have reached the maximum number of attempts. Please try again after 24 hours.",
+        ),
+        "age_ineligible": (
+            "As per Bank of Baroda policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria.",
+            "As per Bank of Baroda policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria.",
+            "As per Bank of Baroda policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria.",
+        ),
+        "technical_error": (
+            "We are facing a technical issue at the moment. Kindly try again after some time and restart your journey.",
+            "We are facing a technical issue at the moment. Kindly try again after some time and restart your journey.",
+            "We are facing a technical issue at the moment. Kindly try again after some time and restart your journey.",
+        ),
+        "aadhaar_pan_not_linked": (
+            "We regret to inform you that your Aadhaar is not linked with your PAN card. Please link it and try again.",
+            "We regret to inform you that your Aadhaar is not linked with your PAN card. Please link it and try again.",
+            "We regret to inform you that your Aadhaar is not linked with your PAN card. Please link it and try again.",
+        ),
+        "aadhaar_hindi_not_supported": (
+            "Currently, Aadhaar verification is not available in Hindi. Please continue in English.",
+            "Currently, Aadhaar verification is not available in Hindi. Please continue in English.",
+            "Currently, Aadhaar verification is not available in Hindi. Please continue in English.",
+        ),
+        "aadhaar_reverify": (
+            "Please ensure your Aadhaar and PAN are linked correctly, then try the verification again.",
+            "Please ensure your Aadhaar and PAN are linked correctly, then try the verification again.",
+            "Please ensure your Aadhaar and PAN are linked correctly, then try the verification again.",
+        ),
+        "aadhaar_verification_failure": (
+            "Sorry, verification could not be completed due to a system issue. Please try again to continue the process.",
+            "Sorry, verification could not be completed due to a system issue. Please try again to continue the process.",
+            "Sorry, verification could not be completed due to a system issue. Please try again to continue the process.",
+        ),
+        "vkyc_pending": (
+            "After Aadhaar verification, please complete your video KYC within 72 hours.",
+            "After Aadhaar verification, please complete your video KYC within 72 hours.",
+            "After Aadhaar verification, please complete your video KYC within 72 hours.",
+        ),
+        "vkyc_expired": (
+            "Your application could not be completed because video KYC was not finished within 72 hours. Please restart the application to continue.",
+            "Your application could not be completed because video KYC was not finished within 72 hours. Please restart the application to continue.",
+            "Your application could not be completed because video KYC was not finished within 72 hours. Please restart the application to continue.",
+        ),
+        "offer_eligible_no_docs": (
+            "Good news, you are eligible for card offers without additional documents.",
+            "Good news, you are eligible for card offers without additional documents.",
+            "Good news, you are eligible for card offers without additional documents.",
+        ),
+        "bank_statement_required": (
+            "To continue, we need your bank statement. You can proceed through net banking or upload your statement manually.",
+            "To continue, we need your bank statement. You can proceed through net banking or upload your statement manually.",
+            "To continue, we need your bank statement. You can proceed through net banking or upload your statement manually.",
+        ),
+        "bank_not_found_manual_upload": (
+            "If your bank is not listed, you can upload your bank statement manually.",
+            "If your bank is not listed, you can upload your bank statement manually.",
+            "If your bank is not listed, you can upload your bank statement manually.",
+        ),
+        "salaried_only": (
+            "Currently, this process is available only for salaried customers.",
+            "Currently, this process is available only for salaried customers.",
+            "Currently, this process is available only for salaried customers.",
+        ),
+        "card_selection_required": (
+            "Please choose one of the available card options to continue.",
+            "Please choose one of the available card options to continue.",
+            "Please choose one of the available card options to continue.",
+        ),
+        "e_consent_step": (
+            "Please review the details and swipe right to proceed.",
+            "Please review the details and swipe right to proceed.",
+            "Please review the details and swipe right to proceed.",
+        ),
+        "vkyc_instructions": (
+            "For video KYC, please keep your original PAN card ready, allow location access, and sit in front of a plain light background.",
+            "For video KYC, please keep your original PAN card ready, allow location access, and sit in front of a plain light background.",
+            "For video KYC, please keep your original PAN card ready, allow location access, and sit in front of a plain light background.",
+        ),
+        "application_complete": (
+            "Your application process is complete. Thank you for choosing Bank of Baroda.",
+            "Your application process is complete. Thank you for choosing Bank of Baroda.",
+            "Your application process is complete. Thank you for choosing Bank of Baroda.",
+        ),
+        "resume_journey": (
+            "Welcome back. You can continue your application from where you left off.",
+            "Welcome back. You can continue your application from where you left off.",
+            "Welcome back. You can continue your application from where you left off.",
+        ),
     }
-    return prompts[issue_type][stage_index]
+    selected_prompts = prompts.get(issue_type, prompts["generic_process_help"])
+    return selected_prompts[stage_index]
 
 
 def build_issue_resolution_reply(
@@ -647,6 +1010,31 @@ def build_issue_resolution_reply(
     language: str = "en-IN",
 ) -> str:
     language = normalize_language(language)
+    deterministic_issue_types = {
+        "retry_after_30_days",
+        "personal_details_mismatch",
+        "max_attempts_exceeded",
+        "age_ineligible",
+        "technical_error",
+        "aadhaar_pan_not_linked",
+        "aadhaar_hindi_not_supported",
+        "aadhaar_reverify",
+        "aadhaar_verification_failure",
+        "vkyc_pending",
+        "vkyc_expired",
+        "offer_eligible_no_docs",
+        "bank_statement_required",
+        "bank_not_found_manual_upload",
+        "salaried_only",
+        "card_selection_required",
+        "e_consent_step",
+        "vkyc_instructions",
+        "application_complete",
+        "resume_journey",
+    }
+    if issue_type in deterministic_issue_types:
+        return build_issue_help_reply(issue_type, language)
+
     if language == "hi-IN":
         replies = {
             ("aadhaar_upload", "error_message"): "ठीक है। स्क्रीन पर जो एरर है, वही पढ़कर बताइए।",

@@ -56,10 +56,11 @@ from app.core.conversation_prompts import (
     build_identity_reprompt,
     build_identity_verification_prompt,
     build_issue_capture_prompt,
+    build_link_confirmation_reprompt,
+    build_link_received_next_prompt,
+    build_link_share_confirmation_prompt,
     build_general_capabilities_reply,
-    build_context_setting_prompt,
     build_post_greeting_issue_prompt,
-    build_process_restart_link_reply,
     build_link_not_received_reply,
     build_language_preference_reprompt,
     build_language_prompt,
@@ -74,6 +75,7 @@ from app.core.conversation_prompts import (
     build_second_unclear_reply,
     build_short_choice_prompt,
     build_sms_link_ack,
+    build_stt_timeout_retry_reply,
     detect_language_preference,
     detect_auth_confirmation,
     detect_auth_denial,
@@ -81,6 +83,7 @@ from app.core.conversation_prompts import (
     detect_resolution_choice,
     detect_consent_choice,
     is_short_valid_intent,
+    is_valid_short_response,
     normalize_language,
     wants_goodbye,
 )
@@ -151,6 +154,14 @@ class ConversationService:
         self.max_turns = max_turns
         self.max_post_resolution_prompts = 1
         self.max_repeat_suppression = 2
+        self._deterministic_early_states: set[BusinessState] = {
+            OPENING,
+            CONSENT_CHECK,
+            LANGUAGE_SELECTION,
+            IDENTITY_VERIFICATION,
+            CONTEXT_SETTING,
+            ISSUE_CAPTURE,
+        }
 
     async def upsert_call(
         self,
@@ -697,6 +708,14 @@ class ConversationService:
                     reply_text = "I understand. Is the issue with OTP, document upload, login, or something else?"
             return await self._build_text_turn(call, reply_text, outcome="short-ack-reprompt")
 
+        if response_plan["route"] == "issue_step_options":
+            await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
+            return await self._build_text_turn(
+                call,
+                self._build_issue_step_options_prompt(prompt_language),
+                outcome="issue-step-options",
+            )
+
         if response_plan["route"] == "general_capabilities":
             await self._set_business_state(call.call_sid, RESOLUTION_ACTION)
             reply_text = build_general_capabilities_reply(prompt_language, response_style=issue_state.response_style)
@@ -708,14 +727,25 @@ class ConversationService:
             return await self._build_text_turn(call, reply_text, outcome="general-capabilities")
 
         if response_plan["route"] == "link_restart_guidance":
-            await self._set_business_state(call.call_sid, RESOLUTION_ACTION)
-            reply_text = build_process_restart_link_reply(prompt_language)
+            self.issue_resolution_service.set_pending_step(call.call_sid, "link_confirmation")
+            await self._set_business_state(call.call_sid, CONTEXT_SETTING)
+            reply_text = build_link_share_confirmation_prompt(prompt_language)
             return await self._build_text_turn(call, reply_text, outcome="link-restart-guidance")
 
         if response_plan["route"] == "link_not_received_guidance":
-            await self._set_business_state(call.call_sid, RESOLUTION_ACTION)
-            reply_text = build_link_not_received_reply(prompt_language)
+            self.issue_resolution_service.set_pending_step(call.call_sid, "link_confirmation")
+            await self._set_business_state(call.call_sid, CONTEXT_SETTING)
+            reply_text = f"{build_link_not_received_reply(prompt_language)} {build_link_confirmation_reprompt(prompt_language)}"
             return await self._build_text_turn(call, reply_text, outcome="link-not-received-guidance")
+
+        if response_plan["route"] == "link_confirmation_clarify":
+            self.issue_resolution_service.set_pending_step(call.call_sid, "link_confirmation")
+            await self._set_business_state(call.call_sid, CONTEXT_SETTING)
+            return await self._build_text_turn(
+                call,
+                build_link_confirmation_reprompt(prompt_language),
+                outcome="link-confirmation-reprompt",
+            )
 
         issue_type = response_plan.get("issue_type") or detect_issue_type(transcript)
         if issue_type:
@@ -948,6 +978,9 @@ class ConversationService:
             max_spoken_chars = max(max_spoken_chars, 360)
         if preserve_full_text:
             max_spoken_chars = max(max_spoken_chars, 720)
+        current_business_state = self.issue_resolution_service.get_state(call.call_sid).business_state
+        if current_business_state in self._deterministic_early_states:
+            max_spoken_chars = min(max_spoken_chars, 360 if outcome == "opening-greeting" else 130)
         language_code = self._prompt_language(call)
         base_text = sanitize_spoken_text(text, max_length=max_spoken_chars)
         response_style = self.issue_resolution_service.get_state(call.call_sid).response_style
@@ -1048,7 +1081,9 @@ class ConversationService:
             await self.add_transcript(call, "customer", transcript)
 
         if not transcript.strip():
-            if quality_state.fallback_mode:
+            if speech_detected:
+                reply = build_stt_timeout_retry_reply(prompt_language)
+            elif quality_state.fallback_mode:
                 reply = "आवाज़ साफ़ नहीं आ रही है। कृपया हाँ, नहीं, कॉलबैक, या लिंक बोलिए।"
             elif quality_state.consecutive_unclear_count >= self.audio_quality_service.settings.noisy_call_retry_prompt_trigger:
                 reply = "आवाज़ साफ़ नहीं आई। कृपया छोटा जवाब दें: हाँ, नहीं, कॉलबैक, या लिंक।"
@@ -1231,12 +1266,13 @@ class ConversationService:
             self.audio_quality_service.register_success(call.call_sid, transcript)
             await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
 
-            if detect_auth_confirmation(transcript):
+            if detect_auth_confirmation(transcript, current_phase=IDENTITY_VERIFICATION):
                 self.issue_resolution_service.mark_identity_verified(call.call_sid)
+                self.issue_resolution_service.set_pending_step(call.call_sid, "link_confirmation")
                 await self._set_business_state(call.call_sid, CONTEXT_SETTING)
                 return await self._build_text_turn(
                     call,
-                    build_context_setting_prompt(language=prompt_language, name=optional_customer_name),
+                    build_link_share_confirmation_prompt(language=prompt_language),
                 )
 
             if detect_auth_denial(transcript):
@@ -1254,7 +1290,41 @@ class ConversationService:
             )
 
         if business_state == CONTEXT_SETTING:
+            if issue_state.pending_step == "link_confirmation":
+                await self.add_transcript(call, "customer", transcript)
+                self.audio_quality_service.register_success(call.call_sid, transcript)
+                await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
+
+                if self._looks_like_link_not_received(transcript):
+                    self.issue_resolution_service.set_pending_step(call.call_sid, "link_confirmation")
+                    reply_text = f"{build_link_not_received_reply(prompt_language)} {build_link_confirmation_reprompt(prompt_language)}"
+                    return await self._build_text_turn(call, reply_text, outcome="link-not-received-guidance")
+
+                if self._looks_like_link_share_request(transcript):
+                    self.issue_resolution_service.set_pending_step(call.call_sid, "link_confirmation")
+                    return await self._build_text_turn(
+                        call,
+                        build_link_share_confirmation_prompt(prompt_language),
+                        outcome="link-shared-confirmation",
+                    )
+
+                if detect_auth_confirmation(transcript, current_phase=CONTEXT_SETTING):
+                    self.issue_resolution_service.set_pending_step(call.call_sid, "issue_capture")
+                    await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
+                    return await self._build_text_turn(
+                        call,
+                        build_link_received_next_prompt(prompt_language, name=optional_customer_name),
+                        outcome="link-confirmed",
+                    )
+
+                return await self._build_text_turn(
+                    call,
+                    build_link_confirmation_reprompt(prompt_language),
+                    outcome="link-confirmation-reprompt",
+                )
+
             if transcript_has_issue:
+                self.issue_resolution_service.set_pending_step(call.call_sid, None)
                 await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
                 return None
 
@@ -1263,17 +1333,64 @@ class ConversationService:
             await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
 
             if self._is_duplicate_short_acknowledgement(transcript, last_customer_text) or is_simple_acknowledgement(transcript):
+                self.issue_resolution_service.set_pending_step(call.call_sid, None)
                 await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
                 return await self._build_text_turn(
                     call,
                     build_issue_capture_prompt(prompt_language, name=optional_customer_name),
                 )
 
+            self.issue_resolution_service.set_pending_step(call.call_sid, None)
             await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
             return await self._build_text_turn(
                 call,
                 build_post_greeting_issue_prompt(prompt_language, name=optional_customer_name),
             )
+
+        if business_state == ISSUE_CAPTURE:
+            if self._looks_like_link_not_received(transcript) or self._looks_like_link_context_followup(transcript):
+                await self.add_transcript(call, "customer", transcript)
+                self.audio_quality_service.register_success(call.call_sid, transcript)
+                await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
+                self.issue_resolution_service.set_pending_step(call.call_sid, "link_confirmation")
+                await self._set_business_state(call.call_sid, CONTEXT_SETTING)
+                reply_text = f"{build_link_not_received_reply(prompt_language)} {build_link_confirmation_reprompt(prompt_language)}"
+                return await self._build_text_turn(call, reply_text, outcome="link-not-received-guidance")
+
+            if self._looks_like_link_share_request(transcript):
+                await self.add_transcript(call, "customer", transcript)
+                self.audio_quality_service.register_success(call.call_sid, transcript)
+                await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
+                self.issue_resolution_service.set_pending_step(call.call_sid, "link_confirmation")
+                await self._set_business_state(call.call_sid, CONTEXT_SETTING)
+                return await self._build_text_turn(
+                    call,
+                    build_link_share_confirmation_prompt(prompt_language),
+                    outcome="link-shared-confirmation",
+                )
+
+            if transcript_has_issue:
+                return None
+
+            await self.add_transcript(call, "customer", transcript)
+            self.audio_quality_service.register_success(call.call_sid, transcript)
+            await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
+
+            if self._looks_like_frustration_signal(transcript):
+                reply_text = f"{build_repair_prompt(prompt_language)} {self._build_issue_step_options_prompt(prompt_language)}"
+                return await self._build_text_turn(call, reply_text, outcome="repair-guidance")
+
+            if (
+                self._looks_like_step_clarification_request(transcript)
+                or is_valid_short_response(transcript, business_state)
+            ):
+                return await self._build_text_turn(
+                    call,
+                    self._build_issue_step_options_prompt(prompt_language),
+                    outcome="issue-step-options",
+                )
+
+            return None
 
         return None
 
@@ -1370,6 +1487,56 @@ class ConversationService:
             "आपने किस लिए कॉल किया",
         )
         return any(marker in normalized for marker in markers)
+
+    @staticmethod
+    def _looks_like_step_clarification_request(text: str) -> bool:
+        normalized = normalize_issue_text(text)
+        if not normalized:
+            return False
+        markers = (
+            "कौन सा चरण",
+            "कौनसा चरण",
+            "किस चरण",
+            "कौन सा step",
+            "which step",
+            "what step",
+            "what is pending",
+            "which stage",
+            "what can you do",
+            "क्या कर सकते हैं",
+        )
+        return any(marker in normalized for marker in markers)
+
+    @staticmethod
+    def _looks_like_frustration_signal(text: str) -> bool:
+        normalized = normalize_issue_text(text)
+        if not normalized:
+            return False
+        markers = (
+            "not clear",
+            "not making sense",
+            "dont understand",
+            "don't understand",
+            "samajh nahi",
+            "samaj nahi",
+            "समझ नहीं",
+            "समझ ही नहीं",
+            "context samajh",
+            "कॉन्टेक्स्ट",
+        )
+        if any(marker in normalized for marker in markers):
+            return True
+        return bool(
+            re.search(r"समझ.*नहीं", normalized)
+            or re.search(r"samajh.*nahi", normalized)
+            or re.search(r"understand.*not", normalized)
+        )
+
+    @staticmethod
+    def _build_issue_step_options_prompt(language: str) -> str:
+        if normalize_language(language) == "hi-IN":
+            return "कृपया बताइए: OTP, PAN/Aadhaar, लॉगिन, दस्तावेज़, या video KYC में दिक्कत है?"
+        return "Please pick one step: OTP, PAN or Aadhaar, login, document upload, or video KYC."
 
     @staticmethod
     def _looks_like_issue_resolved(text: str) -> bool:
@@ -1685,8 +1852,6 @@ class ConversationService:
         business_state = self.issue_resolution_service.get_state(call.call_sid).business_state
         if outcome == "escalation-requested" or business_state == CONFIRMATION_CLOSING:
             return candidate_text
-        if business_state == RESOLUTION_ACTION:
-            return candidate_text
         guidance_states = {ISSUE_CAPTURE, RESOLUTION_ACTION}
         suppress_near_duplicate_questions = business_state not in guidance_states
         recent_window = recent_assistant[-3:]
@@ -1705,7 +1870,9 @@ class ConversationService:
         if repeated_reference:
             issue_state = self.issue_resolution_service.register_repeat_suppression(call.call_sid)
             repeat_count = issue_state.repeat_suppression_count
-            if repeat_count > self.max_repeat_suppression and business_state in {ISSUE_CAPTURE, RESOLUTION_ACTION, CONFIRMATION_CLOSING}:
+            if business_state in {ISSUE_CAPTURE, RESOLUTION_ACTION}:
+                replacement = self._build_issue_step_options_prompt(self._prompt_language(call))
+            elif repeat_count > self.max_repeat_suppression and business_state in {ISSUE_CAPTURE, RESOLUTION_ACTION, CONFIRMATION_CLOSING}:
                 replacement = build_resolution_follow_up_prompt(self._prompt_language(call))
             else:
                 replacement = self._short_reprompt_for_business_state(
@@ -1787,29 +1954,29 @@ class ConversationService:
     ) -> str:
         if language == "en-IN":
             if business_state in {OPENING, CONSENT_CHECK}:
-                return "Is this a good time for a quick two-minute call?"
+                return "Is this a good time for a quick call?"
             if business_state == LANGUAGE_SELECTION:
                 return "Please say Hindi or English."
             if business_state == IDENTITY_VERIFICATION:
                 return "Am I speaking with the correct customer? Please say yes or no."
             if business_state in {CONTEXT_SETTING, ISSUE_CAPTURE, RESOLUTION_ACTION}:
                 variants = (
-                    "Please share your issue briefly.",
-                    "Please tell me the exact step where you are blocked.",
-                    "Please say what is visible on your screen right now.",
+                    "Please tell me the exact blocked step.",
+                    "Please pick one: OTP, PAN/Aadhaar, login, document upload, or video KYC.",
+                    "Please say exactly what you see on screen now.",
                 )
                 return variants[variant_index % len(variants)]
             return "Please repeat that briefly once."
         if business_state in {OPENING, CONSENT_CHECK}:
-            return "क्या अभी दो मिनट बात करना ठीक रहेगा?"
+            return "क्या अभी जल्दी से बात कर सकते हैं?"
         if business_state == LANGUAGE_SELECTION:
             return "कृपया हिंदी या अंग्रेज़ी कहिए।"
         if business_state == IDENTITY_VERIFICATION:
             return "क्या मैं सही ग्राहक से बात कर रही हूँ? हाँ या नहीं कहिए।"
         if business_state in {CONTEXT_SETTING, ISSUE_CAPTURE, RESOLUTION_ACTION}:
             variants = (
-                "कृपया समस्या संक्षेप में बताइए।",
                 "कृपया बताइए आप किस चरण पर रुके हैं।",
+                "कृपया एक चुनें: OTP, PAN/Aadhaar, लॉगिन, दस्तावेज़ अपलोड, या video KYC।",
                 "अभी स्क्रीन पर क्या दिख रहा है, वही बताइए।",
             )
             return variants[variant_index % len(variants)]
@@ -2240,6 +2407,9 @@ class ConversationService:
         resolution_signal = self._looks_like_issue_resolved(transcript)
         no_issue_signal = self._looks_like_no_issue_statement(transcript)
         capability_query = self._looks_like_capability_query(transcript)
+        link_not_received = self._looks_like_link_not_received(transcript)
+        link_share_request = self._looks_like_link_share_request(transcript)
+        link_context_followup = self._looks_like_link_context_followup(transcript)
         audio_state = self.audio_quality_service.get_state(call.call_sid)
         if consent_choice == "opt_out":
             primary_intent = "opt_out"
@@ -2247,6 +2417,8 @@ class ConversationService:
             primary_intent = "send_link"
         elif consent_choice == "callback":
             primary_intent = "callback"
+        elif link_not_received or link_share_request or link_context_followup:
+            primary_intent = "link_followup"
         elif escalation_requested:
             primary_intent = "escalation"
         elif goodbye_requested:
@@ -2259,6 +2431,10 @@ class ConversationService:
             primary_intent = "general_banking_query"
         elif issue_type:
             primary_intent = "issue_follow_up"
+        elif self._looks_like_frustration_signal(transcript):
+            primary_intent = "frustration"
+        elif self._looks_like_step_clarification_request(transcript):
+            primary_intent = "step_clarification"
         elif resolution_signal:
             primary_intent = "resolution_closure"
         elif is_opening_response(transcript) or is_simple_acknowledgement(transcript):
@@ -2289,6 +2465,9 @@ class ConversationService:
             "resolution_signal": resolution_signal,
             "no_issue_signal": no_issue_signal,
             "capability_query": capability_query,
+            "link_not_received": link_not_received,
+            "link_share_request": link_share_request,
+            "link_context_followup": link_context_followup,
             "noisy_call": audio_state.noise_flag,
             "fallback_mode": audio_state.fallback_mode,
         }
@@ -2432,13 +2611,59 @@ class ConversationService:
             objective = "Close the call politely."
             response_source = "prompt"
             should_hangup = True
+        elif self._looks_like_frustration_signal(transcript):
+            route = "repair_guidance"
+            objective = "Repair the conversation when user indicates confusion or frustration."
+            response_source = "prompt"
+            use_gemini = False
+        elif (
+            issue_state.business_state in {CONTEXT_SETTING, ISSUE_CAPTURE, RESOLUTION_ACTION}
+            and self._looks_like_link_not_received(transcript)
+        ):
+            route = "link_not_received_guidance"
+            objective = "Handle link not received/opened before moving to issue capture."
+            response_source = "prompt"
+            use_gemini = False
+        elif (
+            issue_state.business_state in {CONTEXT_SETTING, ISSUE_CAPTURE, RESOLUTION_ACTION}
+            and self._looks_like_link_share_request(transcript)
+        ):
+            route = "link_restart_guidance"
+            objective = "Share or restart link flow and confirm receipt."
+            response_source = "prompt"
+            use_gemini = False
+        elif (
+            issue_state.business_state in {CONTEXT_SETTING, ISSUE_CAPTURE, RESOLUTION_ACTION}
+            and self._looks_like_link_context_followup(transcript)
+        ):
+            route = "link_confirmation_clarify"
+            objective = "Clarify link status when caller mentions link ambiguously."
+            response_source = "prompt"
+            use_gemini = False
+        elif (
+            issue_state.business_state in {CONTEXT_SETTING, ISSUE_CAPTURE, RESOLUTION_ACTION}
+            and self._looks_like_step_clarification_request(transcript)
+        ):
+            route = "issue_step_options"
+            objective = "Provide deterministic step choices to avoid vague loops."
+            response_source = "prompt"
+            use_gemini = False
         elif (
             is_simple_acknowledgement(transcript)
             or looks_like_repeated_acknowledgement(transcript)
             or is_opening_response(transcript)
-        ):
+        ) and not self._looks_like_link_share_request(transcript) and not self._looks_like_link_not_received(transcript) and not self._looks_like_link_context_followup(transcript):
             route = "short_ack_reprompt"
             objective = "Acknowledge briefly and ask the customer for the exact blocked step."
+            response_source = "prompt"
+            use_gemini = False
+        elif (
+            issue_state.business_state in {ISSUE_CAPTURE, RESOLUTION_ACTION}
+            and primary_intent == "general_query"
+            and len(normalize_issue_text(transcript).split()) <= 6
+        ):
+            route = "issue_step_options"
+            objective = "Keep issue capture deterministic for short generic turns."
             response_source = "prompt"
             use_gemini = False
         elif looks_like_repair_request(transcript):
@@ -2448,19 +2673,6 @@ class ConversationService:
         elif primary_intent == "general_banking_query":
             route = "general_capabilities"
             objective = "Answer product or service information queries with concise options."
-            response_source = "prompt"
-            use_gemini = False
-        elif (
-            issue_state.business_state in {CONTEXT_SETTING, ISSUE_CAPTURE, RESOLUTION_ACTION}
-            and self._looks_like_link_share_request(transcript)
-        ):
-            route = "link_restart_guidance"
-            objective = "Acknowledge link request and offer process restart via shared link."
-            response_source = "prompt"
-            use_gemini = False
-        elif self._looks_like_link_not_received(transcript):
-            route = "link_not_received_guidance"
-            objective = "Apologize and offer immediate SMS link resend without asking identity again."
             response_source = "prompt"
             use_gemini = False
         elif primary_intent == "general_query" and self._looks_like_capability_query(transcript):
@@ -2609,6 +2821,14 @@ class ConversationService:
         return has_link_marker and (has_request_marker or has_restart_marker)
 
     @staticmethod
+    def _has_link_reference(text: str) -> bool:
+        normalized = normalize_issue_text(text)
+        if not normalized:
+            return False
+        link_markers = ("link", "sms", "message", "msg", "लिंक", "मैसेज", "संदेश")
+        return any(marker in normalized for marker in link_markers)
+
+    @staticmethod
     def _looks_like_link_not_received(text: str) -> bool:
         normalized = normalize_issue_text(text)
         if not normalized:
@@ -2627,11 +2847,45 @@ class ConversationService:
             "नही आया",
             "missing",
             "open nahi",
+            "open nahi kara",
+            "open nahi kiya",
             "open नहीं",
+            "ओपन नहीं",
+            "ओपन नहीं करा",
+            "ओपन नहीं किया",
+            "खोला नहीं",
+            "खुला नहीं",
+            "open नहीं करा",
+            "open नहीं किया",
         )
         has_link = any(marker in normalized for marker in link_markers)
         has_missing = any(marker in normalized for marker in miss_markers)
         return has_link and has_missing
+
+    @staticmethod
+    def _looks_like_link_context_followup(text: str) -> bool:
+        normalized = normalize_issue_text(text)
+        if not normalized:
+            return False
+        if not ConversationService._has_link_reference(normalized):
+            return False
+        ambiguity_markers = (
+            "link to",
+            "but link",
+            "लिंक तो",
+            "बट लिंक",
+            "लिंक वाला",
+            "लिंक के बारे",
+            "link wala",
+            "open nahi",
+            "open नहीं",
+            "ओपन नहीं",
+            "खुल नहीं",
+            "नहीं खुल",
+        )
+        if any(marker in normalized for marker in ambiguity_markers):
+            return True
+        return len(normalized.split()) <= 5
 
     @staticmethod
     def _apply_voice_guardrail(text: str, *, language_code: str, route: str) -> str:

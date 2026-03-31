@@ -9,6 +9,19 @@ BusinessState = Literal[
     "identity_verification",
     "context_setting",
     "issue_capture",
+    "personal_details_validation",
+    "age_eligibility_check",
+    "aadhaar_verification",
+    "address_capture",
+    "cibil_fetch",
+    "offer_eligibility",
+    "card_selection",
+    "e_consent",
+    "vkyc_pending",
+    "vkyc_complete",
+    "application_complete",
+    "terminal_rejection",
+    "resume_journey",
     "resolution_action",
     "confirmation_closing",
 ]
@@ -43,6 +56,19 @@ CallPhase = Literal[
     "identity_verification",
     "context_setting",
     "issue_capture",
+    "personal_details_validation",
+    "age_eligibility_check",
+    "aadhaar_verification",
+    "address_capture",
+    "cibil_fetch",
+    "offer_eligibility",
+    "card_selection",
+    "e_consent",
+    "vkyc_pending",
+    "vkyc_complete",
+    "application_complete",
+    "terminal_rejection",
+    "resume_journey",
     "resolution_action",
     "confirmation_closing",
 ]
@@ -75,6 +101,19 @@ LANGUAGE_SELECTION = "language_selection"
 IDENTITY_VERIFICATION = "identity_verification"
 CONTEXT_SETTING = "context_setting"
 ISSUE_CAPTURE = "issue_capture"
+PERSONAL_DETAILS_VALIDATION = "personal_details_validation"
+AGE_ELIGIBILITY_CHECK = "age_eligibility_check"
+AADHAAR_VERIFICATION = "aadhaar_verification"
+ADDRESS_CAPTURE = "address_capture"
+CIBIL_FETCH = "cibil_fetch"
+OFFER_ELIGIBILITY = "offer_eligibility"
+CARD_SELECTION = "card_selection"
+E_CONSENT = "e_consent"
+VKYC_PENDING = "vkyc_pending"
+VKYC_COMPLETE = "vkyc_complete"
+APPLICATION_COMPLETE = "application_complete"
+TERMINAL_REJECTION = "terminal_rejection"
+RESUME_JOURNEY = "resume_journey"
 RESOLUTION_ACTION = "resolution_action"
 CONFIRMATION_CLOSING = "confirmation_closing"
 
@@ -153,12 +192,73 @@ AUTH_CONFIRM_KEYWORDS = [
     "haan", "ha", "han", "yes", "correct", "bilkul", "sahi", "theek",
     "right", "that's me", "speaking", "main hoon", "main hun", "bol raha hoon",
     "हाँ", "हां", "जी हाँ", "जी हां", "हाँ जी", "हां जी", "जी",
+    "yes ji", "hello", "हलो", "बोलिए", "bolo",
 ]
 
 AUTH_DENY_KEYWORDS = [
     "nahi", "nahin", "no", "wrong number", "galat number",
     "not me", "wrong person", "koi aur", "kaun",
 ]
+
+SHORT_AFFIRMATIVE_PHRASES = {
+    "हाँ",
+    "हां",
+    "हाँ जी",
+    "हां जी",
+    "जी",
+    "जी हाँ",
+    "जी हां",
+    "yes",
+    "yes ji",
+    "speaking",
+    "main hoon",
+    "main hun",
+    "bol raha hoon",
+    "bilkul",
+    "correct",
+    "right",
+    "ठीक है",
+    "theek hai",
+    "thik hai",
+}
+
+SHORT_VALID_ACK_PHRASES = {
+    "हलो",
+    "हेलो",
+    "hello",
+    "hi",
+    "hey",
+    "namaste",
+    "नमस्ते",
+    "बोलिए",
+    "bolo",
+    "boliye",
+    "हाँ",
+    "हां",
+    "हाँ जी",
+    "हां जी",
+    "जी",
+    "yes",
+    "yes ji",
+    "speaking",
+    "ठीक है",
+    "थीक है",
+    "theek hai",
+    "thik hai",
+    "जी बताइए",
+    "ji batayiye",
+    "ji bataiye",
+}
+
+AFFIRMATIVE_ADVANCE_PHASES = {
+    OPENING,
+    CONSENT_CHECK,
+    IDENTITY_VERIFICATION,
+    CONTEXT_SETTING,
+    AADHAAR_VERIFICATION,
+    CARD_SELECTION,
+    E_CONSENT,
+}
 
 IDENTITY_NAME_STOPWORDS = {
     "hello",
@@ -344,30 +444,48 @@ def build_context_setting_prompt(language: str = "en-IN", name: str = "") -> str
     clean_name = _normalize_name(name)
     if normalize_language(language) == "hi-IN":
         prefix = f"{clean_name} ji, " if clean_name else ""
-        return f"{prefix}मैं आपकी मदद के लिए हूँ। मैं आपको एक लिंक शेयर कर रही हूँ, कृपया उसे ओपन करें।"
+        return f"{prefix}ठीक है। मैं अभी आपको एक लिंक शेयर कर रही हूँ। क्या लिंक मिल गया? कृपया हाँ या नहीं कहिए।"
     prefix = f"{clean_name}, " if clean_name else ""
-    return (
-        f"{prefix}I am calling to help with the BOB Card application or banking step "
-        "where your process got stuck."
-    )
+    return f"{prefix}Okay, I am sharing a link now. Did you receive the link? Please say yes or no."
 
 
 def build_issue_capture_prompt(language: str = "en-IN", name: str = "") -> str:
     clean_name = _normalize_name(name)
     if normalize_language(language) == "hi-IN":
         salutation = _build_hindi_salutation(clean_name)
-        return f"{salutation} मैं आपके साथ यही step पूरा कराती हूँ। बस बताइए अभी दिक्कत किस जगह आ रही है।"
+        return f"{salutation} अब बताइए आप किस जगह पर problem face कर रहे हैं।"
     prefix = f"{clean_name}, " if clean_name else ""
-    return f"{prefix}I will help you complete this step. Please tell me where exactly you are getting stuck right now."
+    return f"{prefix}Please tell me exactly where you are facing a problem."
 
 
 def build_post_greeting_issue_prompt(language: str = "en-IN", name: str = "") -> str:
     clean_name = _normalize_name(name)
     if normalize_language(language) == "hi-IN":
         prefix = f"{clean_name} ji, " if clean_name else ""
-        return f"{prefix}ठीक है, मैं मदद के लिए हूँ। अभी किस step पर दिक्कत आ रही है?"
+        return f"{prefix}ठीक है। अब बताइए किस step पर दिक्कत आ रही है?"
     prefix = f"{clean_name}, " if clean_name else ""
     return f"{prefix}I am calling to help with the BOB Card application step where your process got stuck. Which step is giving you trouble right now?"
+
+
+def build_link_share_confirmation_prompt(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "मैं लिंक शेयर कर रही हूँ। क्या लिंक मिल गया? हाँ या नहीं कहिए।"
+    return "I am sharing the link now. Did you receive it? Please say yes or no."
+
+
+def build_link_confirmation_reprompt(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "कृपया सिर्फ इतना बताइए: लिंक मिला या नहीं मिला?"
+    return "Please tell me only this: link received or not received?"
+
+
+def build_link_received_next_prompt(language: str = "en-IN", name: str = "") -> str:
+    clean_name = _normalize_name(name)
+    if normalize_language(language) == "hi-IN":
+        prefix = f"{clean_name} जी, " if clean_name else ""
+        return f"{prefix}बहुत बढ़िया। अब बताइए किस चरण में दिक्कत आ रही है।"
+    prefix = f"{clean_name}, " if clean_name else ""
+    return f"{prefix}Great. Now tell me where exactly you are facing a problem."
 
 
 def build_general_capabilities_reply(language: str = "en-IN", response_style: str = "default") -> str:
@@ -482,6 +600,158 @@ def build_resolution_follow_up_prompt(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
         return "धन्यवाद, आपकी समस्या का समाधान हो गया है। क्या आपको किसी और चीज़ में मदद चाहिए?"
     return "Glad this issue is resolved. Do you need help with anything else?"
+
+
+def build_retry_after_30_days_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "क्षमा कीजिए, अभी हम आपका आवेदन आगे नहीं बढ़ा सकते। कृपया 30 दिन बाद फिर प्रयास करें।"
+    return "Sorry sir, at the moment we are unable to proceed with your application. You may try again after 30 days."
+
+
+def build_pan_dob_mismatch_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "क्षमा कीजिए, आपका PAN और जन्मतिथि रिकॉर्ड से मेल नहीं खा रहे। कृपया जाँचकर फिर प्रयास करें।"
+    return "Sorry sir, your PAN and date of birth do not match our records. Please check and try again."
+
+
+def build_max_attempts_exceeded_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "आपने अधिकतम प्रयास पूरे कर लिए हैं। कृपया 24 घंटे बाद फिर प्रयास करें।"
+    return "You have reached the maximum number of attempts. Please try again after 24 hours."
+
+
+def build_age_ineligible_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "Bank of Baroda नीति के अनुसार न्यूनतम पात्र आयु 25 वर्ष है। अभी आप इस मानदंड पर पात्र नहीं हैं।"
+    return "As per Bank of Baroda policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria."
+
+
+def build_technical_failure_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "अभी तकनीकी समस्या है। कृपया थोड़ी देर बाद फिर कोशिश करें और अपनी यात्रा दोबारा शुरू करें।"
+    return "We are facing a technical issue at the moment. Kindly try again after some time and restart your journey."
+
+
+def build_aadhaar_pan_not_linked_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "हमें खेद है, आपका Aadhaar PAN से लिंक नहीं है। कृपया लिंक करके फिर प्रयास करें।"
+    return "We regret to inform you that your Aadhaar is not linked with your PAN card. Please link it and try again."
+
+
+def build_aadhaar_hindi_not_supported_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "अभी Aadhaar verification हिंदी में उपलब्ध नहीं है। कृपया English में जारी रखें।"
+    return "Currently, Aadhaar verification is not available in Hindi. Please continue in English."
+
+
+def build_aadhaar_reverify_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "कृपया Aadhaar और PAN लिंक सही करें, फिर verification दोबारा करें।"
+    return "Please ensure your Aadhaar and PAN are linked correctly, then try the verification again."
+
+
+def build_aadhaar_verification_failure_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "क्षमा कीजिए, सिस्टम समस्या के कारण verification पूरा नहीं हो पाया। कृपया फिर से प्रयास करें।"
+    return "Sorry, verification could not be completed due to a system issue. Please try again to continue the process."
+
+
+def build_vkyc_72h_reminder_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "Aadhaar verification के बाद कृपया 72 घंटे के भीतर video KYC पूरा करें।"
+    return "After Aadhaar verification, please complete your video KYC within 72 hours."
+
+
+def build_vkyc_72h_expired_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "Video KYC 72 घंटे में पूरा नहीं हुआ, इसलिए आवेदन बंद हो गया। कृपया प्रक्रिया फिर से शुरू करें।"
+    return "Your application could not be completed because video KYC was not finished within 72 hours. Please restart the application to continue."
+
+
+def build_offer_eligible_no_docs_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "अच्छी खबर, आप बिना अतिरिक्त दस्तावेज़ के card offers के लिए पात्र हैं।"
+    return "Good news, you are eligible for card offers without additional documents."
+
+
+def build_bank_statement_required_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "आगे बढ़ने के लिए bank statement चाहिए। आप net banking से या manual upload से आगे बढ़ सकते हैं।"
+    return "To continue, we need your bank statement. You can proceed through net banking or upload your statement manually."
+
+
+def build_bank_not_listed_manual_upload_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "अगर आपका bank सूची में नहीं है, तो आप statement manual upload से जमा कर सकते हैं।"
+    return "If your bank is not listed, you can upload your bank statement manually."
+
+
+def build_salaried_only_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "अभी यह प्रक्रिया केवल salaried customers के लिए उपलब्ध है।"
+    return "Currently, this process is available only for salaried customers."
+
+
+def build_better_offer_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "आपके bank details देखने के बाद हम बेहतर credit offers दिखा सकते हैं।"
+    return "We may be able to show you better credit offers after reviewing your bank details."
+
+
+def build_card_selection_required_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "कृपया आगे बढ़ने के लिए उपलब्ध card options में से एक चुनें।"
+    return "Please choose one of the available card options to continue."
+
+
+def build_e_consent_step_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "कृपया विवरण देखकर आगे बढ़ने के लिए swipe right करें।"
+    return "Please review the details and swipe right to proceed."
+
+
+def build_vkyc_instructions_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "Video KYC के लिए original PAN रखें, location access allow करें, और plain light background में बैठें।"
+    return "For video KYC, please keep your original PAN card ready, allow location access, and sit in front of a plain light background."
+
+
+def build_application_complete_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "आपकी application प्रक्रिया पूरी हो गई है। Bank of Baroda चुनने के लिए धन्यवाद।"
+    return "Your application process is complete. Thank you for choosing Bank of Baroda."
+
+
+def build_resume_journey_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "Welcome back। आप अपनी application वहीं से जारी कर सकते हैं जहाँ रुकी थी।"
+    return "Welcome back. You can continue your application from where you left off."
+
+
+def build_stt_timeout_retry_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "आपकी आवाज़ आई थी, पर टेक्स्ट पूरा नहीं बन पाया। कृपया एक बार फिर छोटा जवाब दें।"
+    return "I heard your response, but the transcript did not complete. Please repeat in one short line."
+
+
+def build_flow_response(
+    text: str,
+    next_phase: str | None = None,
+    is_terminal: bool = False,
+    response_type: str | None = None,
+    extra: dict | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "text": text,
+        "is_terminal": is_terminal,
+    }
+    if next_phase:
+        payload["next_phase"] = next_phase
+    if response_type:
+        payload["response_type"] = response_type
+    if extra:
+        payload.update(extra)
+    return payload
 
 
 def detect_resolution_choice(text: str) -> ResolutionChoice:
@@ -629,11 +899,13 @@ def detect_escalation_request(text: str) -> bool:
     )
 
 
-def detect_auth_confirmation(text: str) -> bool:
+def detect_auth_confirmation(text: str, current_phase: str | None = None) -> bool:
     normalized = _normalize_choice_text(text)
     if not normalized:
         return False
     if _looks_like_identity_name_confirmation(normalized):
+        return True
+    if should_advance_on_affirmative(text, current_phase or IDENTITY_VERIFICATION):
         return True
     return any(marker in normalized for marker in AUTH_CONFIRM_KEYWORDS)
 
@@ -645,21 +917,70 @@ def detect_auth_denial(text: str) -> bool:
     return any(marker in normalized for marker in AUTH_DENY_KEYWORDS)
 
 
+def is_valid_short_response(text: str, current_phase: str | None = None) -> bool:
+    normalized = _normalize_choice_text(text)
+    if not normalized:
+        return False
+
+    tokens = normalized.split()
+    if len(tokens) > 8:
+        return False
+
+    if normalized in {choice.lower() for choice in SHORT_VALID_ACK_PHRASES}:
+        return True
+
+    if any(normalized.startswith(f"{choice.lower()} ") for choice in SHORT_VALID_ACK_PHRASES):
+        return True
+
+    consent_choice = detect_consent_choice(text, current_stage=current_phase)
+    if consent_choice != "unknown":
+        return True
+
+    if should_advance_on_affirmative(text, current_phase):
+        return True
+
+    if detect_auth_denial(text):
+        return True
+
+    if detect_resolution_choice(text) != "unknown":
+        return True
+
+    return False
+
+
+def should_advance_on_affirmative(text: str, current_phase: str | None = None) -> bool:
+    normalized = _normalize_choice_text(text)
+    if not normalized:
+        return False
+
+    if current_phase and current_phase not in AFFIRMATIVE_ADVANCE_PHASES:
+        return False
+
+    if _looks_like_identity_name_confirmation(normalized):
+        return True
+
+    if any(
+        normalized == choice.lower() or normalized.startswith(f"{choice.lower()} ")
+        for choice in SHORT_AFFIRMATIVE_PHRASES
+    ):
+        return True
+
+    consent_choice = detect_consent_choice(
+        text,
+        current_stage=current_phase if current_phase in {OPENING, CONSENT_CHECK} else None,
+    )
+    return consent_choice == "granted"
+
+
 def is_short_valid_intent(text: str) -> bool:
     normalized = _normalize_choice_text(text)
     if not normalized:
         return False
 
-    if len(normalized.split()) > 5:
+    if len(normalized.split()) > 8:
         return False
 
-    if detect_consent_choice(text) != "unknown":
-        return True
-    if detect_auth_confirmation(text) or detect_auth_denial(text):
-        return True
-    if detect_resolution_choice(text) != "unknown":
-        return True
-    return False
+    return is_valid_short_response(text)
 
 
 def build_opted_out_notice(language: str = "en-IN") -> str:
@@ -731,6 +1052,7 @@ def detect_consent_choice(text: str, current_stage: str | None = None) -> Consen
 
     affirmative_markers = (
         "yes",
+        "yes ji",
         "haan",
         "ha",
         "bilkul",
@@ -738,6 +1060,9 @@ def detect_consent_choice(text: str, current_stage: str | None = None) -> Consen
         "ok",
         "sure",
         "correct",
+        "speaking",
+        "hello",
+        "हलो",
         "हाँ",
         "हां",
         "जी",
@@ -784,6 +1109,22 @@ def next_phase_after_issue_capture() -> CallPhase:
 
 def next_phase_after_resolution(needs_more_help: bool = False) -> CallPhase:
     return ISSUE_CAPTURE if needs_more_help else CONFIRMATION_CLOSING
+
+
+def next_phase_after_address_capture() -> CallPhase:
+    return CIBIL_FETCH
+
+
+def next_phase_after_cibil_fetch() -> CallPhase:
+    return OFFER_ELIGIBILITY
+
+
+def next_phase_after_card_selection() -> CallPhase:
+    return E_CONSENT
+
+
+def next_phase_after_e_consent() -> CallPhase:
+    return VKYC_PENDING
 
 
 def _normalize_choice_text(text: str) -> str:

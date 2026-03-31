@@ -14,6 +14,7 @@ class IssueResolutionState:
     response_style: str = "default"
     post_resolution_check_pending: bool = False
     identity_verified: bool = False
+    pending_step: str | None = None
     post_resolution_prompt_count: int = 0
     repeat_suppression_count: int = 0
 
@@ -39,6 +40,7 @@ class IssueResolutionService:
             state.symptom = None
             state.follow_up_count = 0
             state.repeat_suppression_count = 0
+        state.pending_step = None
         state.post_resolution_check_pending = False
         state.post_resolution_prompt_count = 0
         return state
@@ -66,6 +68,11 @@ class IssueResolutionService:
         state.identity_verified = True
         return state
 
+    def set_pending_step(self, call_sid: str, pending_step: str | None) -> IssueResolutionState:
+        state = self.get_state(call_sid)
+        state.pending_step = pending_step
+        return state
+
     def mark_issue_resolved(self, call_sid: str) -> IssueResolutionState:
         state = self.get_state(call_sid)
         state.business_state = CONFIRMATION_CLOSING
@@ -89,6 +96,7 @@ class IssueResolutionService:
         state.symptom = None
         state.follow_up_count = 0
         state.repeat_suppression_count = 0
+        state.pending_step = None
         return state
 
     def register_post_resolution_prompt(self, call_sid: str) -> IssueResolutionState:

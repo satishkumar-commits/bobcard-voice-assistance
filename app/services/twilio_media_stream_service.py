@@ -1012,14 +1012,12 @@ class TwilioMediaStreamService:
             return False
         if language_code == "hi-IN":
             return (
-                "एआई वॉइस सहायक" in normalized_text
-                and "रिकॉर्ड की जा रही" in normalized_text
-                and "दो मिनट" in normalized_text
+                "bob card" in normalized_text
+                and "आवेदन अधूरा" in normalized_text
             )
         return (
-            "ai assistant" in normalized_text
-            and "recorded for quality" in normalized_text
-            and "two minutes" in normalized_text
+            "bobcards support" in normalized_text
+            and "application is incomplete" in normalized_text
         )
 
     async def _play_streamed_sentences(
@@ -1305,12 +1303,13 @@ class TwilioMediaStreamService:
             build_identity_verification_prompt(language=normalized_language),
             "नमस्ते।" if normalized_language == "hi-IN" else "Hello.",
         ]
+        warmup_call_sid = f"warmup-{normalized_language}"
         for text in prompts:
             with contextlib.suppress(Exception):
                 await self.tts_service.synthesize_bytes(
                     text=sanitize_spoken_text(text, max_length=max(80, int(self.settings.assistant_tts_max_chars))),
                     language_code=normalized_language,
-                    call_sid="",
+                    call_sid=warmup_call_sid,
                     output_audio_codec="mulaw",
                     use_cache=False,
                 )
@@ -1521,9 +1520,9 @@ class TwilioMediaStreamService:
             return False
         if language_code == "hi-IN":
             critical_markers = (
-                "एआई वॉइस सहायक",
-                "रिकॉर्ड की जा रही",
-                "दो मिनट बात",
+                "bob card से बोल",
+                "आवेदन अधूरा",
+                "अभी बात कर सकते",
                 "क्या मैं",
                 "हाँ या नहीं",
                 "लिंक",
@@ -1531,9 +1530,9 @@ class TwilioMediaStreamService:
             )
         else:
             critical_markers = (
-                "ai assistant",
-                "recorded for quality",
-                "two-minute",
+                "bobcards support",
+                "application is incomplete",
+                "talk briefly",
                 "am i speaking",
                 "yes or no",
                 "resend the link",
