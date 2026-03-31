@@ -139,6 +139,40 @@ class TwilioMediaStreamService:
         self._tts_warmed_languages: set[str] = set()
         self._tts_warmup_lock = asyncio.Lock()
 
+    def _spawn_session_task(self, session: MediaStreamSession, coro, *, task_kind: str) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+
+        def _on_done(done_task: asyncio.Task) -> None:
+            if done_task.cancelled():
+                return
+            try:
+                exc = done_task.exception()
+            except Exception:  # noqa: BLE001
+                return
+            if exc is None:
+                return
+            logger.error(
+                "Session task failed call=%s kind=%s error_type=%s detail=%s",
+                session.call_sid,
+                task_kind,
+                type(exc).__name__,
+                " ".join(str(exc).split())[:240],
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            emit_latency_event(
+                {
+                    "step": "session_task_failed",
+                    "call_sid": session.call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "task_kind": task_kind,
+                    "error_type": type(exc).__name__,
+                    "error_detail": " ".join(str(exc).split())[:240],
+                }
+            )
+
+        task.add_done_callback(_on_done)
+        return task
+
     async def handle_websocket(self, websocket: WebSocket) -> None:
         await websocket.accept()
         connection_id = id(websocket)
@@ -247,7 +281,11 @@ class TwilioMediaStreamService:
         if self.settings.tts_static_prompt_warmup:
             asyncio.create_task(self._warm_static_tts_prompts(session.language))
         session.utterance_queue = asyncio.Queue(maxsize=self.settings.stream_utterance_queue_maxsize)
-        session.processing_task = asyncio.create_task(self._consume_utterances(session))
+        session.processing_task = self._spawn_session_task(
+            session,
+            self._consume_utterances(session),
+            task_kind="utterance_consumer",
+        )
         await self.realtime_service.publish_call_phase(session.call_sid, GREETING)
         await self.realtime_service.broadcast_call_event(
             session.call_sid,
@@ -278,7 +316,11 @@ class TwilioMediaStreamService:
             )
 
         session.language = reply.language_code
-        session.playback_task = asyncio.create_task(self._play_reply(session, reply))
+        session.playback_task = self._spawn_session_task(
+            session,
+            self._play_reply(session, reply),
+            task_kind="assistant_playback",
+        )
         return session
 
     async def _handle_media(self, session: MediaStreamSession, message: dict) -> None:
@@ -660,6 +702,11 @@ class TwilioMediaStreamService:
                 )
             else:
                 try:
+                    adaptive_stt_timeout_s = max(
+                        2.0,
+                        self.settings.stream_stt_turn_timeout_seconds
+                        + (0.8 if queued.speech_ms >= 700 else 0.0),
+                    )
                     stt_result = await asyncio.wait_for(
                         self.stt_service.transcribe(
                             audio_bytes=wav_audio,
@@ -671,7 +718,7 @@ class TwilioMediaStreamService:
                             call_sid=session.call_sid,
                             force_rest=True,
                         ),
-                        timeout=max(2.0, self.settings.stream_stt_turn_timeout_seconds),
+                        timeout=adaptive_stt_timeout_s,
                     )
                 except asyncio.TimeoutError:
                     logger.warning(
@@ -686,7 +733,7 @@ class TwilioMediaStreamService:
                             "event_timestamp": utc_now_iso(),
                             "speech_ms": queued.speech_ms,
                             "audio_bytes": len(selected_mulaw_audio),
-                            "timeout_seconds": self.settings.stream_stt_turn_timeout_seconds,
+                            "timeout_seconds": adaptive_stt_timeout_s,
                         }
                     )
                     stt_result = STTResult(
@@ -694,8 +741,55 @@ class TwilioMediaStreamService:
                         language_code=session.language,
                         confidence=0.0,
                         confidence_source="timeout",
-                        speech_detected=False,
+                        speech_detected=queued.speech_ms >= self.settings.stream_vad_min_speech_ms,
                     )
+                    # One bounded retry helps recover from transient provider/network stalls.
+                    retry_timeout_s = max(1.8, self.settings.stream_stt_turn_timeout_seconds * 0.6)
+                    try:
+                        retry_result = await asyncio.wait_for(
+                            self.stt_service.transcribe(
+                                audio_bytes=wav_audio,
+                                filename="twilio-stream-retry.wav",
+                                content_type="audio/x-wav",
+                                language_code=session.language or "unknown",
+                                call_sid=session.call_sid,
+                                force_rest=True,
+                            ),
+                            timeout=retry_timeout_s,
+                        )
+                        stt_result = retry_result
+                        logger.info(
+                            "Latency step=stt_turn_timeout_retry_success call=%s timestamp=%s retry_timeout_seconds=%s",
+                            session.call_sid,
+                            utc_now_iso(),
+                            retry_timeout_s,
+                        )
+                        emit_latency_event(
+                            {
+                                "step": "stt_turn_timeout_retry_success",
+                                "call_sid": session.call_sid,
+                                "event_timestamp": utc_now_iso(),
+                                "retry_timeout_seconds": retry_timeout_s,
+                                "speech_ms": queued.speech_ms,
+                            }
+                        )
+                    except Exception as retry_exc:  # noqa: BLE001
+                        logger.warning(
+                            "STT timeout retry failed call=%s speech_ms=%s error_type=%s detail=%s",
+                            session.call_sid,
+                            queued.speech_ms,
+                            type(retry_exc).__name__,
+                            " ".join(str(retry_exc).split())[:200],
+                        )
+                        emit_latency_event(
+                            {
+                                "step": "stt_turn_timeout_retry_failed",
+                                "call_sid": session.call_sid,
+                                "event_timestamp": utc_now_iso(),
+                                "speech_ms": queued.speech_ms,
+                                "error_type": type(retry_exc).__name__,
+                            }
+                        )
                 except Exception as exc:  # noqa: BLE001
                     error_type = type(exc).__name__
                     error_detail = " ".join(str(exc).strip().split()) or "No error details available"
@@ -750,6 +844,21 @@ class TwilioMediaStreamService:
             )
             transcript = sanitize_spoken_text(stt_result.transcript)
             ignore_noise_transcript = self._should_ignore_noise_transcript(transcript)
+            if (
+                ignore_noise_transcript
+                and stt_result.confidence_source in {"timeout", "error"}
+                and queued.speech_ms >= self.settings.stream_vad_min_speech_ms
+            ):
+                ignore_noise_transcript = False
+                emit_latency_event(
+                    {
+                        "step": "stt_noise_filter_override",
+                        "call_sid": session.call_sid,
+                        "event_timestamp": utc_now_iso(),
+                        "reason": "speech_detected_timeout_or_error",
+                        "speech_ms": queued.speech_ms,
+                    }
+                )
 
             should_interrupt_playback = bool(
                 not ignore_noise_transcript
@@ -837,13 +946,15 @@ class TwilioMediaStreamService:
                             if not text.strip() or session.closed:
                                 return
                             if session.playback_task is None or session.playback_task.done():
-                                session.playback_task = asyncio.create_task(
+                                session.playback_task = self._spawn_session_task(
+                                    session,
                                     self._play_streamed_sentences(
                                         session,
                                         sentence_queue=stream_sentence_queue,
                                         should_hangup_future=stream_completion_future,
                                         response_epoch=response_epoch,
-                                    )
+                                    ),
+                                    task_kind="assistant_streamed_playback",
                                 )
                             try:
                                 stream_sentence_queue.put_nowait(
@@ -895,9 +1006,17 @@ class TwilioMediaStreamService:
                         session.playback_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await session.playback_task
-                    session.playback_task = asyncio.create_task(self._play_reply(session, reply))
+                    session.playback_task = self._spawn_session_task(
+                        session,
+                        self._play_reply(session, reply),
+                        task_kind="assistant_playback",
+                    )
             else:
-                session.playback_task = asyncio.create_task(self._play_reply(session, reply))
+                session.playback_task = self._spawn_session_task(
+                    session,
+                    self._play_reply(session, reply),
+                    task_kind="assistant_playback",
+                )
             logger.info(
                 "Latency step=assistant_reply_ready call=%s mode=media_stream started_at=%s completed_at=%s total_ms=%s",
                 session.call_sid,
@@ -920,6 +1039,7 @@ class TwilioMediaStreamService:
         if session.closed:
             return
 
+        playback_failed = False
         try:
             session.last_assistant_prompt_text = sanitize_spoken_text(reply.text, max_length=220)
             session.assistant_playback_started_at = asyncio.get_running_loop().time()
@@ -990,12 +1110,44 @@ class TwilioMediaStreamService:
         except asyncio.CancelledError:
             logger.info("Assistant playback cancelled for call=%s", session.call_sid)
             raise
+        except Exception as exc:  # noqa: BLE001
+            playback_failed = True
+            logger.error(
+                "Assistant playback failed call=%s error_type=%s detail=%s",
+                session.call_sid,
+                type(exc).__name__,
+                " ".join(str(exc).split())[:240],
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            emit_latency_event(
+                {
+                    "step": "assistant_playback_failed",
+                    "call_sid": session.call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "error_type": type(exc).__name__,
+                    "error_detail": " ".join(str(exc).split())[:240],
+                }
+            )
+            with contextlib.suppress(Exception):
+                await self._publish_tts_status(
+                    session,
+                    {
+                        "stage": "playback_failed",
+                        "codec": session.current_tts_codec or "unknown",
+                        "error_type": type(exc).__name__,
+                    },
+                )
         finally:
             session.assistant_playback_started_at = None
             session.barge_in_speech_ms = 0
             session.playback_started_notified = False
             session.current_tts_codec = ""
             await self.realtime_service.publish_speaking_event(session.call_sid, "assistant", False)
+
+        if playback_failed:
+            if not session.closed:
+                await self.realtime_service.publish_call_phase(session.call_sid, LISTENING)
+            return
 
         if not session.closed and not reply.should_hangup:
             await self.realtime_service.publish_call_phase(session.call_sid, LISTENING)
@@ -1031,6 +1183,7 @@ class TwilioMediaStreamService:
         if session.closed:
             return
 
+        playback_failed = False
         should_hangup = False
         try:
             session.assistant_playback_started_at = asyncio.get_running_loop().time()
@@ -1085,6 +1238,24 @@ class TwilioMediaStreamService:
         except asyncio.CancelledError:
             logger.info("Assistant streamed playback cancelled for call=%s", session.call_sid)
             raise
+        except Exception as exc:  # noqa: BLE001
+            playback_failed = True
+            logger.error(
+                "Assistant streamed playback failed call=%s error_type=%s detail=%s",
+                session.call_sid,
+                type(exc).__name__,
+                " ".join(str(exc).split())[:240],
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            emit_latency_event(
+                {
+                    "step": "assistant_streamed_playback_failed",
+                    "call_sid": session.call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "error_type": type(exc).__name__,
+                    "error_detail": " ".join(str(exc).split())[:240],
+                }
+            )
         finally:
             session.assistant_playback_started_at = None
             session.barge_in_speech_ms = 0
@@ -1094,6 +1265,11 @@ class TwilioMediaStreamService:
             if should_hangup_future.done():
                 with contextlib.suppress(Exception):
                     should_hangup = bool(should_hangup_future.result())
+
+        if playback_failed:
+            if not session.closed:
+                await self.realtime_service.publish_call_phase(session.call_sid, LISTENING)
+            return
 
         if not session.closed and not should_hangup:
             await self.realtime_service.publish_call_phase(session.call_sid, LISTENING)
@@ -1116,31 +1292,78 @@ class TwilioMediaStreamService:
         if streaming_codec != "mulaw":
             raise RuntimeError(f"Unsupported streaming codec for Twilio media stream: {streaming_codec}")
 
-        started_at = perf_counter()
-        total_audio_bytes = 0
-        async for mulaw_audio in self.tts_service.synthesize_chunks(
-            text=text,
-            language_code=language_code,
-            call_sid=session.call_sid,
-            output_audio_codec=streaming_codec,
-            use_cache=False,
-        ):
-            total_audio_bytes += len(mulaw_audio)
-            if first_audio_chunk_ref.get("pending", False):
-                first_audio_chunk_ref["pending"] = False
-                await self._mark_tts_first_chunk_ready(
-                    session,
-                    codec=streaming_codec,
-                    chunk_bytes=len(mulaw_audio),
-                    chunk_kind="mulaw",
+        mode_sequence: list[tuple[str, bool]] = [("persistent", session.tts_persistent_ws_enabled)]
+        if session.tts_persistent_ws_enabled:
+            mode_sequence.append(("transient_retry", False))
+
+        last_error: Exception | None = None
+        for attempt_index, (mode_name, prefer_persistent_ws) in enumerate(mode_sequence):
+            started_at = perf_counter()
+            total_audio_bytes = 0
+            try:
+                async for mulaw_audio in self.tts_service.synthesize_chunks(
+                    text=text,
+                    language_code=language_code,
+                    call_sid=session.call_sid,
+                    output_audio_codec=streaming_codec,
+                    use_cache=False,
+                    prefer_persistent_ws=prefer_persistent_ws,
+                ):
+                    total_audio_bytes += len(mulaw_audio)
+                    if first_audio_chunk_ref.get("pending", False):
+                        first_audio_chunk_ref["pending"] = False
+                        await self._mark_tts_first_chunk_ready(
+                            session,
+                            codec=streaming_codec,
+                            chunk_bytes=len(mulaw_audio),
+                            chunk_kind="mulaw",
+                        )
+                    await self._send_mulaw_audio(session, mulaw_audio)
+                if allow_slow_mode:
+                    self._update_tts_slow_mode(
+                        session,
+                        tts_latency_ms=int((perf_counter() - started_at) * 1000),
+                        audio_bytes=total_audio_bytes,
+                    )
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                can_retry = attempt_index < (len(mode_sequence) - 1)
+                if not can_retry:
+                    raise
+
+                logger.warning(
+                    "TTS attempt failed; retrying call=%s mode=%s next_mode=%s error_type=%s detail=%s",
+                    session.call_sid,
+                    mode_name,
+                    mode_sequence[attempt_index + 1][0],
+                    type(exc).__name__,
+                    " ".join(str(exc).split())[:200],
                 )
-            await self._send_mulaw_audio(session, mulaw_audio)
-        if allow_slow_mode:
-            self._update_tts_slow_mode(
-                session,
-                tts_latency_ms=int((perf_counter() - started_at) * 1000),
-                audio_bytes=total_audio_bytes,
-            )
+                emit_latency_event(
+                    {
+                        "step": "assistant_tts_retry",
+                        "call_sid": session.call_sid,
+                        "event_timestamp": utc_now_iso(),
+                        "attempt": attempt_index + 1,
+                        "mode": mode_name,
+                        "next_mode": mode_sequence[attempt_index + 1][0],
+                        "error_type": type(exc).__name__,
+                    }
+                )
+                # Reset persistent stream before fallback retry to avoid stale websocket state.
+                if session.tts_persistent_ws_enabled:
+                    with contextlib.suppress(Exception):
+                        await self.tts_service.reset_call_stream(
+                            session.call_sid,
+                            language_code=language_code,
+                        )
+                continue
+
+        if last_error is not None:
+            raise last_error
 
     async def _cancel_playback(self, session: MediaStreamSession, reason: str) -> None:
         if not session.playback_task or session.playback_task.done():
@@ -1715,7 +1938,8 @@ class TwilioMediaStreamService:
                 "transcript_preview": transcript_preview,
             }
         )
-        session.playback_task = asyncio.create_task(
+        session.playback_task = self._spawn_session_task(
+            session,
             self._play_reply(
                 session,
                 ConversationReply(
@@ -1723,7 +1947,8 @@ class TwilioMediaStreamService:
                     language_code=session.language or "hi-IN",
                     should_hangup=False,
                 ),
-            )
+            ),
+            task_kind="assistant_noise_reprompt_playback",
         )
 
     @staticmethod

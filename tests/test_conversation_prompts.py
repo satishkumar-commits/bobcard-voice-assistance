@@ -3,6 +3,8 @@ import unittest
 from app.core.conversation_prompts import (
     build_general_capabilities_reply,
     build_human_handoff_reply,
+    build_link_sent_confirmation_prompt,
+    build_link_share_confirmation_prompt,
     build_opening_greeting,
     build_process_restart_link_reply,
     detect_consent_choice,
@@ -81,6 +83,16 @@ class ConversationPromptsTests(unittest.TestCase):
         reply = build_process_restart_link_reply("hi-IN")
         self.assertIn("लिंक", reply)
         self.assertIn("फिर से", reply)
+
+    def test_link_share_prompt_takes_consent_first(self) -> None:
+        reply = build_link_share_confirmation_prompt("hi-IN")
+        self.assertIn("क्या मैं आपको", reply)
+        self.assertIn("हाँ या नहीं", reply)
+
+    def test_link_sent_prompt_checks_receipt_after_consent(self) -> None:
+        reply = build_link_sent_confirmation_prompt("hi-IN")
+        self.assertIn("लिंक शेयर", reply)
+        self.assertIn("मिला या नहीं मिला", reply)
 
 
 if __name__ == "__main__":

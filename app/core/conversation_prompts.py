@@ -342,7 +342,7 @@ def build_opening_greeting(
 
     display_name = f"{clean_name} ji" if clean_name else "there"
     return (
-        f"Hello {display_name}. I am {assistant_name}, an AI assistant calling on behalf of Bank of Baroda. "
+        f"Hello {display_name}. I am {assistant_name}, an AI assistant calling on behalf of BOB Card. "
         "This call is recorded for quality purposes. "
         "Your BOBCards credit card application is incomplete, and I am calling to help you complete it. "
         "Is this a good time to speak for two minutes?"
@@ -444,9 +444,15 @@ def build_context_setting_prompt(language: str = "en-IN", name: str = "") -> str
     clean_name = _normalize_name(name)
     if normalize_language(language) == "hi-IN":
         prefix = f"{clean_name} ji, " if clean_name else ""
-        return f"{prefix}ठीक है। मैं अभी आपको एक लिंक शेयर कर रही हूँ। क्या लिंक मिल गया? कृपया हाँ या नहीं कहिए।"
+        return (
+            f"{prefix}ठीक है। क्या मैं आपको एक लिंक शेयर करूँ ताकि हम प्रक्रिया जहाँ रुकी थी उसे पूरा कर सकें? "
+            "कृपया हाँ या नहीं कहिए।"
+        )
     prefix = f"{clean_name}, " if clean_name else ""
-    return f"{prefix}Okay, I am sharing a link now. Did you receive the link? Please say yes or no."
+    return (
+        f"{prefix}Okay, may I share a link so we can continue from where the process stopped? "
+        "Please say yes or no."
+    )
 
 
 def build_issue_capture_prompt(language: str = "en-IN", name: str = "") -> str:
@@ -469,14 +475,34 @@ def build_post_greeting_issue_prompt(language: str = "en-IN", name: str = "") ->
 
 def build_link_share_confirmation_prompt(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
-        return "मैं लिंक शेयर कर रही हूँ। क्या लिंक मिल गया? हाँ या नहीं कहिए।"
-    return "I am sharing the link now. Did you receive it? Please say yes or no."
+        return "क्या मैं आपको एक लिंक शेयर करूँ ताकि हम प्रक्रिया जहाँ रुकी थी उसे पूरा कर सकें? कृपया हाँ या नहीं कहिए।"
+    return "May I share a link so we can continue from where the process stopped? Please say yes or no."
+
+
+def build_link_sent_confirmation_prompt(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "धन्यवाद। मैं अभी लिंक शेयर कर रही हूँ। कृपया बताइए: लिंक मिला या नहीं मिला?"
+    return "Thank you. I am sharing the link now. Please tell me: link received or not received."
 
 
 def build_link_confirmation_reprompt(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
         return "कृपया सिर्फ इतना बताइए: लिंक मिला या नहीं मिला?"
     return "Please tell me only this: link received or not received?"
+
+
+def build_link_safety_reassurance_reply(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return (
+            "अच्छा सवाल। यह BOB Card का official link है। "
+            "कृपया OTP, PIN या CVV कभी साझा न करें। "
+            "क्या मैं यही official link दोबारा भेज दूँ?"
+        )
+    return (
+        "Good question. This is an official BOB Card link. "
+        "Please do not share OTP, PIN, or CVV with anyone. "
+        "Should I resend the same official link now?"
+    )
 
 
 def build_link_received_next_prompt(language: str = "en-IN", name: str = "") -> str:
@@ -568,8 +594,8 @@ def build_sms_link_ack(language: str = "en-IN") -> str:
 
 def build_process_restart_link_reply(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
-        return "जी, मैं आपको एक लिंक शेयर कर सकती हूँ ताकि हम प्रक्रिया फिर से शुरू कर सकें।"
-    return "Yes, I can share a link so we can start the process again."
+        return "जी, क्या मैं आपको एक लिंक शेयर करूँ ताकि हम प्रक्रिया जहाँ रुकी थी वहाँ से फिर से शुरू कर सकें?"
+    return "Yes, may I share a link so we can restart from where the process stopped?"
 
 
 def build_link_not_received_reply(language: str = "en-IN") -> str:
@@ -622,8 +648,8 @@ def build_max_attempts_exceeded_reply(language: str = "en-IN") -> str:
 
 def build_age_ineligible_reply(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
-        return "Bank of Baroda नीति के अनुसार न्यूनतम पात्र आयु 25 वर्ष है। अभी आप इस मानदंड पर पात्र नहीं हैं।"
-    return "As per Bank of Baroda policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria."
+        return "BOB Card नीति के अनुसार न्यूनतम पात्र आयु 25 वर्ष है। अभी आप इस मानदंड पर पात्र नहीं हैं।"
+    return "As per BOB Card policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria."
 
 
 def build_technical_failure_reply(language: str = "en-IN") -> str:
@@ -718,8 +744,8 @@ def build_vkyc_instructions_reply(language: str = "en-IN") -> str:
 
 def build_application_complete_reply(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
-        return "आपकी application प्रक्रिया पूरी हो गई है। Bank of Baroda चुनने के लिए धन्यवाद।"
-    return "Your application process is complete. Thank you for choosing Bank of Baroda."
+        return "आपकी application प्रक्रिया पूरी हो गई है। BOB Card चुनने के लिए धन्यवाद।"
+    return "Your application process is complete. Thank you for choosing BOB Card."
 
 
 def build_resume_journey_reply(language: str = "en-IN") -> str:

@@ -16,3 +16,21 @@
 {"type": "latency", "timestamp": "2026-03-31T11:24:13.428560+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-03-31T11:24:13.383+00:00"}
 {"type": "latency", "timestamp": "2026-03-31T11:24:52.610411+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-03-31T11:24:51.558+00:00", "to_number": "***5407", "language": "hi-IN"}
 {"type": "latency", "timestamp": "2026-03-31T11:25:06.137007+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-03-31T11:25:06.128+00:00"}
+{"type": "latency", "timestamp": "2026-03-31T11:32:55.987000+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-03-31T11:32:54.811+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-03-31T11:33:03.834018+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-03-31T11:33:03.833+00:00"}
+{"type": "latency", "timestamp": "2026-03-31T11:39:15.859294+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-03-31T11:39:15.076+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-03-31T11:39:24.994205+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-03-31T11:39:24.994+00:00"}
+{"type": "latency", "timestamp": "2026-03-31T11:49:00.565936+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-03-31T11:48:59.718+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-03-31T11:49:07.996892+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-03-31T11:49:07.958+00:00"}
+{"type": "latency", "timestamp": "2026-03-31T11:49:40.088126+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-03-31T11:49:39.441+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-03-31T11:49:45.938584+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-03-31T11:49:45.928+00:00"}
+{"type": "latency", "timestamp": "2026-03-31T11:57:41.224438+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-03-31T11:57:40.310+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-03-31T11:57:49.152871+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-03-31T11:57:49.108+00:00"}
+{"type": "latency", "timestamp": "2026-03-31T12:12:35.601919+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-03-31T12:12:34.351+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-03-31T12:12:43.526929+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-03-31T12:12:43.526+00:00"}
+{"type": "latency", "timestamp": "2026-03-31T12:30:22.245630+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-03-31T12:30:21.033+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-03-31T12:30:32.366230+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-03-31T12:30:32.286+00:00"}
+{"type": "latency", "timestamp": "2026-03-31T12:37:51.988493+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-03-31T12:37:51.184+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-03-31T12:38:00.422366+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-03-31T12:38:00.384+00:00"}
+{"type": "latency", "timestamp": "2026-03-31T12:45:37.802153+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-03-31T12:45:36.981+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-03-31T12:45:46.846265+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-03-31T12:45:46.807+00:00"}

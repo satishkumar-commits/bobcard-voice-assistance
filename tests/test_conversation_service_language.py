@@ -35,7 +35,14 @@ class ConversationServiceLanguageGuardTests(unittest.TestCase):
 
     def test_link_request_has_deterministic_restart_route(self) -> None:
         self.assertIn('if response_plan["route"] == "link_restart_guidance":', self.source)
-        self.assertIn("build_process_restart_link_reply(prompt_language)", self.source)
+        self.assertIn('set_pending_step(call.call_sid, "link_share_consent")', self.source)
+        self.assertIn("build_link_sent_confirmation_prompt(prompt_language)", self.source)
+
+    def test_link_safety_route_uses_gemini_with_guarded_fallback(self) -> None:
+        self.assertIn("def _build_link_safety_reassurance_text(", self.source)
+        self.assertIn("guidance_instruction", self.source)
+        self.assertIn("await self._generate_gemini_reply(", self.source)
+        self.assertIn("if not self._looks_like_link_safety_reassurance_reply(reply_text):", self.source)
 
 
 if __name__ == "__main__":

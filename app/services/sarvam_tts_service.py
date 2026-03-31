@@ -64,6 +64,7 @@ class SarvamTTSService:
         call_sid: str = "",
         output_audio_codec: str | None = None,
         use_cache: bool = True,
+        prefer_persistent_ws: bool | None = None,
     ) -> AsyncIterator[bytes]:
         prepared_text = self._prepare_text_for_tts(text, language_code)
         resolved_codec = (output_audio_codec or self.output_audio_codec).strip().lower() or self.output_audio_codec
@@ -95,7 +96,8 @@ class SarvamTTSService:
 
         streamed_audio = bytearray()
         try:
-            if self.settings.tts_persistent_ws and call_sid:
+            use_persistent_ws = self.settings.tts_persistent_ws if prefer_persistent_ws is None else prefer_persistent_ws
+            if use_persistent_ws and call_sid:
                 stream = self._stream_via_persistent_connection(
                     prepared_text=prepared_text,
                     language_code=language_code,
@@ -229,6 +231,7 @@ class SarvamTTSService:
         call_sid: str = "",
         output_audio_codec: str | None = None,
         use_cache: bool = True,
+        prefer_persistent_ws: bool | None = None,
     ) -> bytes:
         chunks: list[bytes] = []
         async for chunk in self.synthesize_chunks(
@@ -237,6 +240,7 @@ class SarvamTTSService:
             call_sid=call_sid,
             output_audio_codec=output_audio_codec,
             use_cache=use_cache,
+            prefer_persistent_ws=prefer_persistent_ws,
         ):
             chunks.append(chunk)
         return b"".join(chunks)
@@ -386,6 +390,11 @@ class SarvamTTSService:
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
+                # If outer playback task is being cancelled, propagate cancellation instead
+                # of converting it into a timeout runtime error.
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise asyncio.CancelledError
                 if total_audio_bytes > 0:
                     logger.warning(
                         "Sarvam TTS stream timed out waiting for completion; closing reply early call=%s codec=%s audio_bytes=%s",

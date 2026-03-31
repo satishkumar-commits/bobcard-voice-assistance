@@ -362,7 +362,10 @@ def detect_issue_type(text: str) -> IssueType | None:
         return "e_consent_step"
     if _contains_any(normalized, ("video kyc instructions", "original pan card ready", "plain light background", "allow location access")):
         return "vkyc_instructions"
-    if _contains_any(normalized, ("application complete", "process complete", "thank you for choosing bank of baroda")):
+    if _contains_any(
+        normalized,
+        ("application complete", "process complete", "thank you for choosing bank of baroda", "thank you for choosing bob card"),
+    ):
         return "application_complete"
     if _contains_any(normalized, ("welcome back", "resume journey", "continue from where you left off")):
         return "resume_journey"
@@ -482,7 +485,7 @@ def build_issue_help_reply(issue_type: IssueType, language: str = "en-IN") -> st
         "retry_after_30_days": "Sorry sir, at the moment we are unable to proceed with your application. You may try again after 30 days.",
         "personal_details_mismatch": "Sorry sir, your PAN and date of birth do not match our records. Please check and try again.",
         "max_attempts_exceeded": "You have reached the maximum number of attempts. Please try again after 24 hours.",
-        "age_ineligible": "As per Bank of Baroda policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria.",
+        "age_ineligible": "As per BOB Card policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria.",
         "technical_error": "We are facing a technical issue at the moment. Kindly try again after some time and restart your journey.",
         "aadhaar_pan_not_linked": "We regret to inform you that your Aadhaar is not linked with your PAN card. Please link it and try again.",
         "aadhaar_hindi_not_supported": "Currently, Aadhaar verification is not available in Hindi. Please continue in English.",
@@ -497,7 +500,7 @@ def build_issue_help_reply(issue_type: IssueType, language: str = "en-IN") -> st
         "card_selection_required": "Please choose one of the available card options to continue.",
         "e_consent_step": "Please review the details and swipe right to proceed.",
         "vkyc_instructions": "For video KYC, please keep your original PAN card ready, allow location access, and sit in front of a plain light background.",
-        "application_complete": "Your application process is complete. Thank you for choosing Bank of Baroda.",
+        "application_complete": "Your application process is complete. Thank you for choosing BOB Card.",
         "resume_journey": "Welcome back. You can continue your application from where you left off.",
     }
     return replies[issue_type]
@@ -631,6 +634,83 @@ def detect_issue_symptom(text: str) -> IssueSymptom | None:
     if _contains_any(normalized, ("pata nahi", "dont know", "don't know", "not sure", "पता नहीं", "मालूम नहीं")):
         return "unknown"
     return None
+
+
+def looks_like_issue_resolved_signal(text: str, issue_type: IssueType | None = None) -> bool:
+    normalized = normalize_issue_text(text)
+    if not normalized:
+        return False
+
+    strong_done_markers = (
+        "resolved",
+        "problem solved",
+        "issue solved",
+        "all set",
+        "done",
+        "complete",
+        "completed",
+        "ho gaya",
+        "ho gya",
+        "hogaya",
+        "ठीक हो गया",
+        "हल हो गया",
+        "हल हो गई",
+        "रिजॉल्व",
+        "रिज़ॉल्व",
+    )
+    generic_negative_markers = (
+        "not resolved",
+        "resolve nahi",
+        "resolved nahi",
+        "नहीं हुआ",
+        "नही हुआ",
+        "नहीं हो रहा",
+        "नही हो रहा",
+        "pending",
+        "stuck",
+        "error",
+        "failed",
+    )
+    if any(marker in normalized for marker in strong_done_markers) and not any(
+        marker in normalized for marker in generic_negative_markers
+    ):
+        return True
+
+    if issue_type == "otp_issue":
+        otp_positive_markers = (
+            "otp mil gaya",
+            "otp aa gaya",
+            "otp received",
+            "received otp",
+            "ओटीपी मिल गया",
+            "ओटीपी आ गया",
+            "ओटीपी मिल गया है",
+            "ओटीपी आ गया है",
+            "sms mil gaya",
+            "sms aa gaya",
+            "message mil gaya",
+            "मैसेज मिल गया",
+            "संदेश मिल गया",
+        )
+        otp_negative_markers = (
+            "otp nahi mila",
+            "otp nahin mila",
+            "otp nahi aa",
+            "otp not received",
+            "not received otp",
+            "ओटीपी नहीं मिला",
+            "ओटीपी नही मिला",
+            "ओटीपी नहीं आया",
+            "ओटीपी नही आया",
+            "invalid otp",
+            "गलत otp",
+            "ओटीपी गलत",
+        )
+        return any(marker in normalized for marker in otp_positive_markers) and not any(
+            marker in normalized for marker in otp_negative_markers
+        )
+
+    return False
 
 
 def build_issue_follow_up_question(
@@ -915,9 +995,9 @@ def build_issue_follow_up_question(
             "You have reached the maximum number of attempts. Please try again after 24 hours.",
         ),
         "age_ineligible": (
-            "As per Bank of Baroda policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria.",
-            "As per Bank of Baroda policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria.",
-            "As per Bank of Baroda policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria.",
+            "As per BOB Card policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria.",
+            "As per BOB Card policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria.",
+            "As per BOB Card policy, the minimum eligible age is 25 years. Currently, you do not meet this criteria.",
         ),
         "technical_error": (
             "We are facing a technical issue at the moment. Kindly try again after some time and restart your journey.",
@@ -990,9 +1070,9 @@ def build_issue_follow_up_question(
             "For video KYC, please keep your original PAN card ready, allow location access, and sit in front of a plain light background.",
         ),
         "application_complete": (
-            "Your application process is complete. Thank you for choosing Bank of Baroda.",
-            "Your application process is complete. Thank you for choosing Bank of Baroda.",
-            "Your application process is complete. Thank you for choosing Bank of Baroda.",
+            "Your application process is complete. Thank you for choosing BOB Card.",
+            "Your application process is complete. Thank you for choosing BOB Card.",
+            "Your application process is complete. Thank you for choosing BOB Card.",
         ),
         "resume_journey": (
             "Welcome back. You can continue your application from where you left off.",
