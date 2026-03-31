@@ -1341,6 +1341,15 @@ class ConversationService:
                         outcome="link-safety-reassurance",
                     )
 
+                if detect_auth_denial(transcript):
+                    self.issue_resolution_service.set_pending_step(call.call_sid, None)
+                    await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
+                    return await self._build_text_turn(
+                        call,
+                        build_issue_capture_prompt(prompt_language, name=optional_customer_name),
+                        outcome="link-share-declined",
+                    )
+
                 if self._looks_like_link_share_request(transcript) or detect_auth_confirmation(
                     transcript, current_phase=CONTEXT_SETTING
                 ):
@@ -1349,15 +1358,6 @@ class ConversationService:
                         call,
                         build_link_sent_confirmation_prompt(prompt_language),
                         outcome="link-share-consented",
-                    )
-
-                if detect_auth_denial(transcript):
-                    self.issue_resolution_service.set_pending_step(call.call_sid, None)
-                    await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
-                    return await self._build_text_turn(
-                        call,
-                        build_issue_capture_prompt(prompt_language, name=optional_customer_name),
-                        outcome="link-share-declined",
                     )
 
                 return await self._build_text_turn(
@@ -2028,6 +2028,7 @@ class ConversationService:
                     business_state,
                     self._prompt_language(call),
                     variant_index=repeat_count,
+                    pending_step=issue_state.pending_step,
                 )
             logger.info(
                 "Assistant repeat suppressed for call=%s business_state=%s repeat_count=%s old_preview=%s replacement_preview=%s",
@@ -2100,6 +2101,7 @@ class ConversationService:
         business_state: BusinessState,
         language: str = "hi-IN",
         variant_index: int = 0,
+        pending_step: str | None = None,
     ) -> str:
         if language == "en-IN":
             if business_state in {OPENING, CONSENT_CHECK}:
@@ -2109,6 +2111,13 @@ class ConversationService:
             if business_state == IDENTITY_VERIFICATION:
                 return "Am I speaking with the correct customer? Please say yes or no."
             if business_state == CONTEXT_SETTING:
+                if pending_step == "link_share_consent":
+                    variants = (
+                        "Please say yes or no. May I share the official link?",
+                        "Should I share the link now? Please say yes or no.",
+                        "I will proceed only with your consent. May I send the link?",
+                    )
+                    return variants[variant_index % len(variants)]
                 variants = (
                     "Please confirm if the link was received.",
                     "Please say link received or not received.",
@@ -2130,6 +2139,13 @@ class ConversationService:
         if business_state == IDENTITY_VERIFICATION:
             return "क्या मैं सही ग्राहक से बात कर रही हूँ? हाँ या नहीं कहिए।"
         if business_state == CONTEXT_SETTING:
+            if pending_step == "link_share_consent":
+                variants = (
+                    "कृपया हाँ या नहीं कहिए। क्या मैं official लिंक शेयर करूँ?",
+                    "क्या मैं अभी लिंक भेजूँ? कृपया सिर्फ हाँ या नहीं कहिए।",
+                    "आपकी अनुमति के बाद ही लिंक भेजूँगी। क्या मैं भेजूँ?",
+                )
+                return variants[variant_index % len(variants)]
             variants = (
                 "कृपया बताइए, लिंक मिला या नहीं मिला।",
                 "कृपया सिर्फ इतना कहिए: लिंक मिला या नहीं।",

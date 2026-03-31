@@ -34,3 +34,5 @@
 {"type": "latency", "timestamp": "2026-03-31T12:38:00.422366+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-03-31T12:38:00.384+00:00"}
 {"type": "latency", "timestamp": "2026-03-31T12:45:37.802153+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-03-31T12:45:36.981+00:00", "to_number": "***5407", "language": "hi-IN"}
 {"type": "latency", "timestamp": "2026-03-31T12:45:46.846265+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-03-31T12:45:46.807+00:00"}
+{"type": "latency", "timestamp": "2026-03-31T12:49:51.856674+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-03-31T12:49:50.402+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-03-31T12:49:59.986663+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-03-31T12:49:59.949+00:00"}

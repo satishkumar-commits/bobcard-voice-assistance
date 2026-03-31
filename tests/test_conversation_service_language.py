@@ -44,6 +44,11 @@ class ConversationServiceLanguageGuardTests(unittest.TestCase):
         self.assertIn("await self._generate_gemini_reply(", self.source)
         self.assertIn("if not self._looks_like_link_safety_reassurance_reply(reply_text):", self.source)
 
+    def test_context_reprompt_respects_link_share_consent_step(self) -> None:
+        self.assertIn('if pending_step == "link_share_consent":', self.source)
+        self.assertIn("May I share the official link?", self.source)
+        self.assertIn("क्या मैं official लिंक शेयर करूँ?", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

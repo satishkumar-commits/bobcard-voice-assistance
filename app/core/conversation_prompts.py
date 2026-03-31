@@ -198,6 +198,7 @@ AUTH_CONFIRM_KEYWORDS = [
 AUTH_DENY_KEYWORDS = [
     "nahi", "nahin", "no", "wrong number", "galat number",
     "not me", "wrong person", "koi aur", "kaun",
+    "नहीं", "नही", "ना", "ना जी", "नहीं चाहिए", "मत भेजो", "मत भेजिए",
 ]
 
 SHORT_AFFIRMATIVE_PHRASES = {

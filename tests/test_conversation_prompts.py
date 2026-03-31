@@ -7,6 +7,7 @@ from app.core.conversation_prompts import (
     build_link_share_confirmation_prompt,
     build_opening_greeting,
     build_process_restart_link_reply,
+    detect_auth_denial,
     detect_consent_choice,
     detect_escalation_request,
     detect_language_preference,
@@ -29,6 +30,10 @@ class ConversationPromptsTests(unittest.TestCase):
     def test_no_maps_to_callback_only_in_consent_stage(self) -> None:
         self.assertEqual(detect_consent_choice("नहीं", current_stage="consent_check"), "callback")
         self.assertEqual(detect_consent_choice("नहीं", current_stage="identity_verification"), "unknown")
+
+    def test_detect_auth_denial_supports_hindi_short_no(self) -> None:
+        self.assertTrue(detect_auth_denial("नहीं"))
+        self.assertTrue(detect_auth_denial("ना"))
 
     def test_goodbye_detection(self) -> None:
         self.assertTrue(wants_goodbye("thanks bye"))
