@@ -942,6 +942,8 @@ class ConversationService:
                         active_issue_type=issue_type,
                         call_sid=call.call_sid,
                         on_assistant_sentence=on_assistant_sentence,
+                        current_phase=issue_state.business_state,
+                        pending_step=issue_state.pending_step,
                         llm_streaming_enabled=llm_streaming_enabled,
                     )
                     return await self._build_text_turn(
@@ -969,6 +971,8 @@ class ConversationService:
                         active_issue_type=issue_type,
                         call_sid=call.call_sid,
                         on_assistant_sentence=on_assistant_sentence,
+                        current_phase=issue_state.business_state,
+                        pending_step=issue_state.pending_step,
                         llm_streaming_enabled=llm_streaming_enabled,
                     )
                     return await self._build_text_turn(
@@ -989,6 +993,8 @@ class ConversationService:
                     active_issue_type=issue_type,
                     call_sid=call.call_sid,
                     on_assistant_sentence=on_assistant_sentence,
+                    current_phase=issue_state.business_state,
+                    pending_step=issue_state.pending_step,
                     llm_streaming_enabled=llm_streaming_enabled,
                 )
                 return await self._build_text_turn(
@@ -1013,6 +1019,8 @@ class ConversationService:
                         active_issue_type=issue_state.issue_type,
                         call_sid=call.call_sid,
                         on_assistant_sentence=on_assistant_sentence,
+                        current_phase=issue_state.business_state,
+                        pending_step=issue_state.pending_step,
                         llm_streaming_enabled=llm_streaming_enabled,
                     )
                     return await self._build_text_turn(
@@ -1032,6 +1040,8 @@ class ConversationService:
                         active_issue_type=issue_state.issue_type,
                         call_sid=call.call_sid,
                         on_assistant_sentence=on_assistant_sentence,
+                        current_phase=issue_state.business_state,
+                        pending_step=issue_state.pending_step,
                         llm_streaming_enabled=llm_streaming_enabled,
                     )
                     return await self._build_text_turn(
@@ -1052,6 +1062,8 @@ class ConversationService:
                     active_issue_type=issue_type,
                     call_sid=call.call_sid,
                     on_assistant_sentence=on_assistant_sentence,
+                    current_phase=issue_state.business_state,
+                    pending_step=issue_state.pending_step,
                     llm_streaming_enabled=llm_streaming_enabled,
                 )
                 return await self._build_text_turn(
@@ -1117,6 +1129,8 @@ class ConversationService:
             active_issue_type=issue_state.issue_type,
             call_sid=call.call_sid,
             on_assistant_sentence=on_assistant_sentence,
+            current_phase=issue_state.business_state,
+            pending_step=issue_state.pending_step,
             llm_streaming_enabled=llm_streaming_enabled,
         )
         noisy_ack = build_noisy_mode_acknowledgement(prompt_language)
@@ -2217,6 +2231,17 @@ class ConversationService:
         if not normalized:
             return TranscriptClassification(label="empty", reason="empty_transcript")
 
+        link_pending_state = pending_step in {"link_share_consent", "link_decline_reason", "link_confirmation"}
+        if (
+            business_state == CONTEXT_SETTING
+            and link_pending_state
+            and (
+                self._looks_like_link_safety_concern(transcript)
+                or self._looks_like_link_safety_concern_without_reference(transcript)
+            )
+        ):
+            return TranscriptClassification(label="valid", reason="link_safety_routed_in_context_flow")
+
         if self._looks_like_trust_or_fraud_objection(transcript) or self._looks_like_identity_verification_request(transcript):
             return TranscriptClassification(label="objection", reason="trust_or_verification_objection")
 
@@ -2753,16 +2778,28 @@ class ConversationService:
             return text
 
         max_chars = 170
+        trust_safety_outcomes = {
+            "trust-objection-hold",
+            "trust-objection-safe-fallback",
+            "link-safety-reassurance",
+            "link-share-decline-followup",
+        }
         if outcome == "opening-greeting":
             max_chars = 340
         if outcome in {"resolution-complete", "issue-resolved", "customer-ended", "general-capabilities"}:
             max_chars = 125
+        if outcome in trust_safety_outcomes:
+            # Keep trust/safety guidance complete enough to answer fraud concerns
+            # instead of over-compressing to a bare acknowledgement.
+            max_chars = 240
 
         sentence_limit = 2
         if outcome == "opening-greeting":
             sentence_limit = 5
         if outcome in {"resolution-complete", "issue-resolved", "customer-ended"}:
             sentence_limit = 1
+        if outcome in trust_safety_outcomes:
+            sentence_limit = 3
 
         sentences = [part.strip() for part in re.split(r"[।.!?]+", cleaned) if part.strip()]
         if sentences:
@@ -2941,6 +2978,8 @@ class ConversationService:
             call_sid=call_sid,
             # Keep trust-and-safety reassurance as one compact answer.
             on_assistant_sentence=None,
+            current_phase=CONTEXT_SETTING,
+            pending_step="link_confirmation",
             llm_streaming_enabled=False,
             allow_latency_filler=False,
         )
@@ -2986,6 +3025,8 @@ class ConversationService:
             call_sid=call_sid,
             # Keep trust-and-consent follow-up as one compact answer.
             on_assistant_sentence=None,
+            current_phase=CONTEXT_SETTING,
+            pending_step="link_decline_reason",
             llm_streaming_enabled=False,
             allow_latency_filler=False,
         )
@@ -3055,6 +3096,8 @@ class ConversationService:
         active_issue_type: str | None,
         call_sid: str,
         on_assistant_sentence: Callable[[str, str], Awaitable[None]] | None,
+        current_phase: BusinessState | str = "",
+        pending_step: str | None = None,
         llm_streaming_enabled: bool | None = None,
         allow_latency_filler: bool = True,
     ) -> str:
@@ -3184,6 +3227,8 @@ class ConversationService:
                     response_style=response_style,
                     active_issue_type=active_issue_type,
                     call_sid=call_sid,
+                    current_phase=str(current_phase or ""),
+                    pending_step=(pending_step or ""),
                     on_text_chunk=on_stream_chunk if on_assistant_sentence is not None else None,
                 )
             else:
@@ -3195,6 +3240,8 @@ class ConversationService:
                     response_style=response_style,
                     active_issue_type=active_issue_type,
                     call_sid=call_sid,
+                    current_phase=str(current_phase or ""),
+                    pending_step=(pending_step or ""),
                 )
         finally:
             if filler_task and not filler_task.done():

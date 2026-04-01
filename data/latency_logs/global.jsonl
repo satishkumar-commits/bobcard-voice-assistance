@@ -52,3 +52,12 @@
 {"type": "latency", "timestamp": "2026-04-01T06:53:57.938675+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-04-01T06:53:57.817+00:00"}
 {"type": "latency", "timestamp": "2026-04-01T07:02:06.253626+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-04-01T07:02:05.460+00:00", "to_number": "***5407", "language": "hi-IN"}
 {"type": "latency", "timestamp": "2026-04-01T07:02:14.086093+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-04-01T07:02:14.041+00:00"}
+{"type": "latency", "timestamp": "2026-04-01T18:46:29.245795+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-04-01T18:46:27.220+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-04-01T18:47:48.495555+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-04-01T18:47:47.013+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-04-01T18:47:57.340595+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-04-01T18:47:57.193+00:00"}
+{"type": "latency", "timestamp": "2026-04-01T19:34:56.029683+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-04-01T19:34:54.688+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-04-01T19:35:04.981261+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-04-01T19:35:04.939+00:00"}
+{"type": "latency", "timestamp": "2026-04-01T19:44:59.997596+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-04-01T19:44:59.162+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-04-01T19:45:10.491072+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-04-01T19:45:10.442+00:00"}
+{"type": "latency", "timestamp": "2026-04-01T19:54:22.703760+00:00", "step": "outbound_call_requested", "call_sid": "", "event_timestamp": "2026-04-01T19:54:20.737+00:00", "to_number": "***5407", "language": "hi-IN"}
+{"type": "latency", "timestamp": "2026-04-01T19:54:31.455414+00:00", "step": "twilio_media_websocket_connected", "event_timestamp": "2026-04-01T19:54:31.416+00:00"}

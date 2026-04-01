@@ -26,6 +26,9 @@ class ConversationPromptsTests(unittest.TestCase):
     def test_detects_consent_granted(self) -> None:
         self.assertEqual(detect_consent_choice("Yes, we can talk now"), "granted")
 
+    def test_hello_does_not_auto_grant_consent(self) -> None:
+        self.assertEqual(detect_consent_choice("hello", current_stage="consent_check"), "unknown")
+
     def test_detects_opt_out(self) -> None:
         self.assertEqual(detect_consent_choice("Please do not call me"), "opt_out")
 
@@ -86,6 +89,9 @@ class ConversationPromptsTests(unittest.TestCase):
     def test_resolution_choice_detects_hindi_done_phrase(self) -> None:
         self.assertEqual(detect_resolution_choice("हो गया"), "no_more_help")
 
+    def test_resolution_choice_does_not_false_match_no_in_words(self) -> None:
+        self.assertEqual(detect_resolution_choice("knowledge"), "unknown")
+
     def test_short_valid_intent_detects_hindi_done_phrase(self) -> None:
         self.assertTrue(is_short_valid_intent("हो गया"))
 
@@ -107,6 +113,9 @@ class ConversationPromptsTests(unittest.TestCase):
     def test_identity_affirmation_phrase_with_boliye_advances(self) -> None:
         self.assertTrue(should_advance_on_affirmative("जी हाँ बोलिए", current_phase="identity_verification"))
         self.assertTrue(detect_auth_confirmation("जी हाँ बोलिए", current_phase="identity_verification"))
+
+    def test_identity_confirmation_does_not_accept_plain_hello(self) -> None:
+        self.assertFalse(detect_auth_confirmation("hello", current_phase="identity_verification"))
 
 
 if __name__ == "__main__":

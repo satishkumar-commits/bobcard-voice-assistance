@@ -23,7 +23,7 @@ from app.core.issue_guidance import (
     detect_issue_symptom,
     detect_issue_type,
 )
-from app.core.prompts import BANKING_SYSTEM_PROMPT, HUMAN_HANDOFF_REPLY, build_conversation_prompt
+from app.core.prompts import BANKING_SYSTEM_PROMPT, HUMAN_HANDOFF_REPLY, build_conversation_prompt, build_state_aware_prompt
 from app.services.realtime_service import emit_latency_event
 from app.utils.helpers import contains_devanagari, contains_latin, sanitize_spoken_text, utc_now_iso
 
@@ -63,6 +63,8 @@ class GeminiService:
         response_style: str = "default",
         active_issue_type: str | None = None,
         call_sid: str = "",
+        current_phase: str = "",
+        pending_step: str = "",
     ) -> str:
         decision = await self.generate_reply_decision(
             history=history,
@@ -72,6 +74,8 @@ class GeminiService:
             response_style=response_style,
             active_issue_type=active_issue_type,
             call_sid=call_sid,
+            current_phase=current_phase,
+            pending_step=pending_step,
         )
         return decision.text
 
@@ -84,6 +88,8 @@ class GeminiService:
         response_style: str = "default",
         active_issue_type: str | None = None,
         call_sid: str = "",
+        current_phase: str = "",
+        pending_step: str = "",
     ) -> GeminiReplyDecision:
         preferred_language = normalize_language(language_code)
         payload = self._build_generate_payload(
@@ -93,6 +99,8 @@ class GeminiService:
             preferred_language=preferred_language,
             response_style=response_style,
             active_issue_type=active_issue_type,
+            current_phase=current_phase,
+            pending_step=pending_step,
         )
         headers = {"x-goog-api-key": self.settings.gemini_api_key}
         request_sent_at = utc_now_iso()
@@ -179,6 +187,8 @@ class GeminiService:
         response_style: str = "default",
         active_issue_type: str | None = None,
         call_sid: str = "",
+        current_phase: str = "",
+        pending_step: str = "",
         on_text_chunk: Callable[[str], Awaitable[None]] | None = None,
     ) -> GeminiReplyDecision:
         preferred_language = normalize_language(language_code)
@@ -189,6 +199,8 @@ class GeminiService:
             preferred_language=preferred_language,
             response_style=response_style,
             active_issue_type=active_issue_type,
+            current_phase=current_phase,
+            pending_step=pending_step,
         )
         headers = {"x-goog-api-key": self.settings.gemini_api_key}
         request_sent_at = utc_now_iso()
@@ -327,7 +339,30 @@ class GeminiService:
         preferred_language: str,
         response_style: str,
         active_issue_type: str | None,
+        current_phase: str,
+        pending_step: str,
     ) -> dict[str, Any]:
+        prompt_text = (
+            build_state_aware_prompt(
+                current_phase=current_phase,
+                history=history,
+                latest_user_text=latest_user_text,
+                response_mode=response_mode,
+                preferred_language=preferred_language,
+                response_style=response_style,
+                issue_notes=(active_issue_type or "").replace("_", " "),
+                pending_step=pending_step,
+            )
+            if current_phase
+            else build_conversation_prompt(
+                history=history,
+                latest_user_text=latest_user_text,
+                response_mode=response_mode,
+                preferred_language=preferred_language,
+                response_style=response_style,
+                issue_notes=(active_issue_type or "").replace("_", " "),
+            )
+        )
         return {
             "system_instruction": {
                 "parts": [{"text": BANKING_SYSTEM_PROMPT}],
@@ -337,14 +372,7 @@ class GeminiService:
                     "role": "user",
                     "parts": [
                         {
-                            "text": build_conversation_prompt(
-                                history=history,
-                                latest_user_text=latest_user_text,
-                                response_mode=response_mode,
-                                preferred_language=preferred_language,
-                                response_style=response_style,
-                                issue_notes=(active_issue_type or "").replace("_", " "),
-                            )
+                            "text": prompt_text
                         }
                     ],
                 }

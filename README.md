@@ -15,6 +15,8 @@ This project handles both inbound and outbound calls, streams live call audio ov
 - Transcribes customer utterances with Sarvam STT.
 - Runs a banking-focused conversation flow:
   - consent check
+  - intent based
+  - knowbased intent
   - language selection
   - identity confirmation
   - issue capture
@@ -52,6 +54,10 @@ This project handles both inbound and outbound calls, streams live call audio ov
 5. Finalized audio is converted to WAV and sent to Sarvam STT.
 6. `ConversationService` decides the next reply using business-state logic, issue guidance, and Gemini when needed.
 7. Reply text is synthesized with Sarvam TTS.
+
+
+
+
 8. TTS audio is converted to Twilio-compatible audio and streamed back into the same live call.
 9. Call state, transcripts, latency events, and summaries are pushed to the browser dashboard in realtime.
 

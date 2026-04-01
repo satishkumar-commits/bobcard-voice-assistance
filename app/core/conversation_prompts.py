@@ -195,6 +195,12 @@ AUTH_CONFIRM_KEYWORDS = [
     "yes ji", "hello", "हलो", "बोलिए", "bolo",
 ]
 
+AUTH_CONFIRM_STRICT_KEYWORDS = [
+    "haan", "ha", "han", "yes", "correct", "bilkul", "sahi", "theek",
+    "right", "that's me", "speaking", "main hoon", "main hun", "bol raha hoon",
+    "हाँ", "हां", "जी हाँ", "जी हां", "हाँ जी", "हां जी", "yes ji",
+]
+
 AUTH_DENY_KEYWORDS = [
     "nahi", "nahin", "no", "wrong number", "galat number",
     "not me", "wrong person", "koi aur", "kaun",
@@ -838,7 +844,7 @@ def detect_resolution_choice(text: str) -> ResolutionChoice:
         "समस्या नहीं",
         "दिक्कत नहीं",
     )
-    if normalized in no_more_help_markers or any(marker in normalized for marker in no_more_help_markers):
+    if _contains_any_phrase(normalized, no_more_help_markers):
         return "no_more_help"
 
     more_help_markers = (
@@ -861,7 +867,7 @@ def detect_resolution_choice(text: str) -> ResolutionChoice:
         "एक और दिक्कत",
         "एक और issue",
     )
-    if normalized in more_help_markers or any(marker in normalized for marker in more_help_markers):
+    if _contains_any_phrase(normalized, more_help_markers):
         return "more_help"
 
     return "unknown"
@@ -920,7 +926,7 @@ def detect_escalation_request(text: str) -> bool:
         "insaan",
         "manushya",
     )
-    if any(marker in normalized for marker in direct_request_markers):
+    if _contains_any_phrase(normalized, direct_request_markers):
         return True
 
     frustration_markers = (
@@ -933,8 +939,9 @@ def detect_escalation_request(text: str) -> bool:
         "this is wrong",
     )
     escalation_context_markers = ("agent", "manager", "senior", "human", "supervisor", "escalate")
-    return any(marker in normalized for marker in frustration_markers) and any(
-        marker in normalized for marker in escalation_context_markers
+    return _contains_any_phrase(normalized, frustration_markers) and _contains_any_phrase(
+        normalized,
+        escalation_context_markers,
     )
 
 
@@ -946,7 +953,8 @@ def detect_auth_confirmation(text: str, current_phase: str | None = None) -> boo
         return True
     if should_advance_on_affirmative(text, current_phase or IDENTITY_VERIFICATION):
         return True
-    return any(marker in normalized for marker in AUTH_CONFIRM_KEYWORDS)
+    keyword_pool = AUTH_CONFIRM_STRICT_KEYWORDS if current_phase == IDENTITY_VERIFICATION else AUTH_CONFIRM_KEYWORDS
+    return _contains_any_phrase(normalized, keyword_pool)
 
 
 def detect_auth_denial(text: str) -> bool:
@@ -969,7 +977,7 @@ def detect_auth_denial(text: str) -> bool:
     )
     if normalized in strict_no_markers:
         return True
-    return any(marker in normalized for marker in phrase_markers)
+    return _contains_any_phrase(normalized, phrase_markers)
 
 
 def is_valid_short_response(text: str, current_phase: str | None = None) -> bool:
@@ -1070,7 +1078,7 @@ def detect_consent_choice(text: str, current_stage: str | None = None) -> Consen
         "रुचि नहीं",
         "दिलचस्पी नहीं",
     )
-    if any(marker in normalized for marker in opt_out_markers):
+    if _contains_any_phrase(normalized, opt_out_markers):
         return "opt_out"
 
     send_link_markers = (
@@ -1086,7 +1094,7 @@ def detect_consent_choice(text: str, current_stage: str | None = None) -> Consen
         "sms भेजो",
         "मैसेज भेजो",
     )
-    if any(marker in normalized for marker in send_link_markers):
+    if _contains_any_phrase(normalized, send_link_markers):
         return "send_link"
 
     callback_markers = (
@@ -1109,7 +1117,7 @@ def detect_consent_choice(text: str, current_stage: str | None = None) -> Consen
         "सुबह",
         "शाम",
     )
-    if any(marker in normalized for marker in callback_markers):
+    if _contains_any_phrase(normalized, callback_markers):
         return "callback"
 
     affirmative_markers = (
@@ -1118,29 +1126,22 @@ def detect_consent_choice(text: str, current_stage: str | None = None) -> Consen
         "haan",
         "ha",
         "bilkul",
-        "okay",
-        "ok",
         "sure",
         "correct",
         "speaking",
-        "hello",
-        "हलो",
         "हाँ",
         "हां",
-        "जी",
         "जी हाँ",
         "जी हां",
         "हाँ जी",
         "हां जी",
-        "ठीक है",
-        "theek hai",
         "बात कर सकते हैं",
         "baat kar sakte hain",
         "talk kar sakte hain",
         "we can talk",
         "can talk now",
     )
-    if normalized in affirmative_markers or any(marker in normalized for marker in affirmative_markers):
+    if _contains_any_phrase(normalized, affirmative_markers):
         return "granted"
 
     if normalized in {"no", "nahi", "nahin", "नहीं", "नही"}:
@@ -1195,6 +1196,23 @@ def _normalize_choice_text(text: str) -> str:
     normalized = re.sub(r"[^\w\s\u0900-\u097F]", " ", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
+
+
+def _contains_any_phrase(normalized_text: str, markers: tuple[str, ...] | list[str]) -> bool:
+    if not normalized_text:
+        return False
+    tokens = set(normalized_text.split())
+    for marker in markers:
+        phrase = _normalize_choice_text(marker)
+        if not phrase:
+            continue
+        if " " in phrase:
+            if phrase in normalized_text:
+                return True
+            continue
+        if phrase in tokens:
+            return True
+    return False
 
 
 def _looks_like_identity_name_confirmation(normalized_text: str) -> bool:
