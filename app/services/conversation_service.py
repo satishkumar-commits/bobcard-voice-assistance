@@ -1323,7 +1323,7 @@ class ConversationService:
                 self.audio_quality_service.register_success(call.call_sid, transcript)
                 await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
 
-                if self._looks_like_link_safety_concern(transcript):
+                if self._looks_like_link_safety_concern(transcript) or self._looks_like_link_safety_concern_without_reference(transcript):
                     self.issue_resolution_service.set_pending_step(call.call_sid, "link_share_consent")
                     reply_text = await self._build_link_safety_reassurance_text(
                         history=history,
@@ -2019,14 +2019,40 @@ class ConversationService:
         if repeated_reference:
             issue_state = self.issue_resolution_service.register_repeat_suppression(call.call_sid)
             repeat_count = issue_state.repeat_suppression_count
-            if business_state in {ISSUE_CAPTURE, RESOLUTION_ACTION}:
-                replacement = self._build_issue_step_options_prompt(self._prompt_language(call))
+            prompt_language = self._prompt_language(call)
+            if (
+                business_state in {ISSUE_CAPTURE, RESOLUTION_ACTION}
+                and issue_state.issue_type
+                and outcome
+                and outcome.startswith("guided-")
+                and repeat_count <= 1
+            ):
+                emit_latency_event(
+                    {
+                        "step": "assistant_repeat_bypass",
+                        "call_sid": call.call_sid,
+                        "event_timestamp": utc_now_iso(),
+                        "business_state": business_state,
+                        "repeat_count": repeat_count,
+                        "reason": "preserve_active_issue_context",
+                        "issue_type": issue_state.issue_type,
+                    }
+                )
+                return candidate_text
+            if business_state in {ISSUE_CAPTURE, RESOLUTION_ACTION} and issue_state.issue_type:
+                replacement = build_issue_follow_up_question(
+                    issue_state.issue_type,
+                    prompt_language,
+                    follow_up_count=max(1, issue_state.follow_up_count),
+                )
             elif repeat_count > self.max_repeat_suppression and business_state in {ISSUE_CAPTURE, RESOLUTION_ACTION, CONFIRMATION_CLOSING}:
                 replacement = build_resolution_follow_up_prompt(self._prompt_language(call))
+            elif business_state in {ISSUE_CAPTURE, RESOLUTION_ACTION}:
+                replacement = self._build_issue_step_options_prompt(prompt_language)
             else:
                 replacement = self._short_reprompt_for_business_state(
                     business_state,
-                    self._prompt_language(call),
+                    prompt_language,
                     variant_index=repeat_count,
                     pending_step=issue_state.pending_step,
                 )
@@ -2354,13 +2380,15 @@ class ConversationService:
             response_style=response_style,
             active_issue_type=issue_type,
             call_sid=call_sid,
-            on_assistant_sentence=on_assistant_sentence,
-            llm_streaming_enabled=llm_streaming_enabled,
+            # Keep trust-and-safety reassurance as one compact answer.
+            on_assistant_sentence=None,
+            llm_streaming_enabled=False,
+            allow_latency_filler=False,
         )
 
         if not self._looks_like_link_safety_reassurance_reply(reply_text):
-            return build_link_safety_reassurance_reply(prompt_language)
-        return reply_text
+            reply_text = build_link_safety_reassurance_reply(prompt_language)
+        return self._compact_link_safety_reassurance_reply(reply_text, prompt_language)
 
     @staticmethod
     def _looks_like_link_safety_reassurance_reply(text: str) -> bool:
@@ -2386,6 +2414,26 @@ class ConversationService:
             marker in normalized for marker in safety_markers
         )
 
+    @staticmethod
+    def _compact_link_safety_reassurance_reply(text: str, language: str) -> str:
+        cleaned = sanitize_spoken_text(text, max_length=200)
+        if not cleaned:
+            return build_link_safety_reassurance_reply(language)
+        sentence_parts = [part.strip() for part in re.split(r"[।.!?]+", cleaned) if part.strip()]
+        compact = "। ".join(sentence_parts[:3]).strip() if sentence_parts else cleaned
+        compact = sanitize_spoken_text(compact, max_length=190)
+        if normalize_language(language) == "hi-IN":
+            if "क्या" not in compact and "?" not in compact:
+                compact = f"{compact.rstrip('।')}। क्या मैं यही official लिंक दोबारा भेज दूँ?"
+            if compact and compact[-1] not in {"?", "।", "!"}:
+                compact = f"{compact}।"
+        else:
+            if "?" not in compact:
+                compact = f"{compact.rstrip('.')} Should I resend the same official link now?"
+            if compact and compact[-1] not in {"?", ".", "!"}:
+                compact = f"{compact}."
+        return sanitize_spoken_text(compact, max_length=210)
+
     async def _generate_gemini_reply(
         self,
         *,
@@ -2398,6 +2446,7 @@ class ConversationService:
         call_sid: str,
         on_assistant_sentence: Callable[[str, str], Awaitable[None]] | None,
         llm_streaming_enabled: bool | None = None,
+        allow_latency_filler: bool = True,
     ) -> str:
         await self._publish_call_phase(call_sid, GEMINI_REQUESTED)
         stream_buffer = ""
@@ -2411,7 +2460,7 @@ class ConversationService:
             partial_min_chars + 8,
             int(self.gemini_service.settings.assistant_stream_force_flush_chars),
         )
-        filler_enabled = bool(self.gemini_service.settings.assistant_gemini_filler_enabled)
+        filler_enabled = bool(self.gemini_service.settings.assistant_gemini_filler_enabled and allow_latency_filler)
         filler_delay_ms = max(200, int(self.gemini_service.settings.assistant_gemini_filler_delay_ms))
         stream_buffer_lock = asyncio.Lock()
         stream_flush_task: asyncio.Task | None = None
@@ -2654,7 +2703,13 @@ class ConversationService:
         capability_query = self._looks_like_capability_query(transcript)
         link_not_received = self._looks_like_link_not_received(transcript)
         link_share_request = self._looks_like_link_share_request(transcript)
-        link_safety_concern = self._looks_like_link_safety_concern(transcript)
+        link_pending_context = (
+            issue_state.business_state == CONTEXT_SETTING
+            and (issue_state.pending_step or "").startswith("link_")
+        )
+        link_safety_concern = self._looks_like_link_safety_concern(transcript) or (
+            link_pending_context and self._looks_like_link_safety_concern_without_reference(transcript)
+        )
         link_context_followup = self._looks_like_link_context_followup(transcript)
         audio_state = self.audio_quality_service.get_state(call.call_sid)
         if consent_choice == "opt_out":

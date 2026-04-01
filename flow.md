@@ -24,9 +24,9 @@ The application is designed around a real-time, streaming architecture using Twi
 
 ---
 
-## 2. Conversation State Machine (`CallPhase`)
+## 2. Business Logic State Machine (`BusinessState`)
 
-The core conversation logic is managed by a state machine defined by the `CallPhase` enum in `app/core/conversation_prompts.py`. The `ConversationService` orchestrates transitions between these phases.
+The core conversation logic is managed by a high-level state machine. The `ConversationService` orchestrates transitions between these business phases based on user input and the current context of the call.
 
 1.  **`opening`**
     -   **Trigger**: A new call stream starts.
@@ -36,7 +36,7 @@ The core conversation logic is managed by a state machine defined by the `CallPh
         -   Bank identity (BOBCards / BOBCards)
         -   Purpose (credit card application continuation)
         -   Recording notice
-    -   **Audio**: The greeting is synthesized and played to the user.
+    -   **Action**: The greeting is synthesized and played to the user.
     -   **Next Phase**: `consent_check`.
 
 2.  **`consent_check`**
@@ -54,18 +54,24 @@ The core conversation logic is managed by a state machine defined by the `CallPh
     -   **Trigger**: User grants consent.
     -   **Action**: The agent asks the user to choose between English and Hindi using `build_language_prompt`. The user's response is parsed by `detect_language_preference`.
     -   **Next Phase**: `identity_confirmation`.
+    -   **Note**: If the user's language is clear from their first response, this step may be skipped.
 
-4.  **`identity_confirmation`**
+4.  **`identity_verification`**
     -   **Trigger**: User selects a language.
-    -   **Action**: The agent confirms it is speaking to the correct person (this step is currently a simple pass-through in the MVP).
-    -   **Next Phase**: Determined by `next_phase_after_identity`. It transitions to `issue_capture` if no issue is known, or `resolution` if an issue was pre-loaded.
+    -   **Action**: The agent confirms it is speaking to the correct person using `build_identity_verification_prompt`.
+    -   **Next Phase**: `context_setting`.
 
-5.  **`issue_capture`**
-    -   **Trigger**: Identity is confirmed and the specific issue is not yet known.
+5.  **`context_setting`**
+    -   **Trigger**: Identity is verified.
+    -   **Action**: The agent offers to share a link to resume the application process using `build_link_share_confirmation_prompt`. It handles user consent for the link, confirms receipt, and can address security concerns.
+    -   **Next Phase**: `issue_capture`.
+
+6.  **`issue_capture`**
+    -   **Trigger**: The `context_setting` phase is complete, or the user has declined the link.
     -   **Action**: The agent asks the user to describe their problem using `build_issue_capture_prompt`.
-    -   **Next Phase**: `resolution`.
+    -   **Next Phase**: `resolution_action`.
 
-6.  **`resolution`**
+7.  **`resolution_action`**
     -   **Trigger**: The user has described their issue.
     -   **Action (Hybrid AI Model)**: This is the core of the AI's decision-making process.
         1.  **Rule-Based Triage**: The user's transcript is first passed to `detect_issue_type` and `detect_issue_symptom` in `issue_guidance.py`. This step quickly identifies known problems (e.g., "Aadhaar upload", "OTP issue").
@@ -73,16 +79,38 @@ The core conversation logic is managed by a state machine defined by the `CallPh
         3.  **Guided Questioning (Medium-Confidence)**: If only an issue type is detected but the symptom is unclear (e.g., issue: "Aadhaar upload", symptom: unknown), the system uses `build_issue_follow_up_question` to ask a targeted question to narrow down the problem (e.g., "Is the image blurry, or is the upload failing?").
         4.  **Generative Path (Low-Confidence / Conversational)**: If the rule-based system cannot classify the issue, or if the user's query is more conversational, the `GeminiService` is invoked. It uses the conversation history and a detailed system prompt (`SYSTEM_PROMPT` from `app/core/prompts.py`) to generate a helpful, human-like response. This allows the AI to handle a wider range of queries gracefully.
     -   **Follow-up**: After a resolution step, the agent asks if more help is needed using `build_resolution_follow_up_prompt`.
-    -   **Next Phase**: Determined by `next_phase_after_resolution`. It loops back to `issue_capture` if the user needs more help, or moves to `closing` if the problem is solved.
+    -   **Next Phase**: Determined by `next_phase_after_resolution`. It loops back to `issue_capture` if the user needs more help, or moves to `confirmation_closing` if the problem is solved.
 
-7.  **`closing`**
+8.  **`confirmation_closing`**
     -   **Trigger**: The issue is resolved, the user requested a callback, or the user opted out.
     -   **Action**: A final, appropriate closing message is generated (e.g., `build_goodbye_reply`, `build_callback_ack`).
     -   **Final Action**: The call is terminated.
 
 ---
 
-## 3. Data Flow: A Single Utterance
+## 3. Technical Call Phases (`CallPhase`)
+
+For real-time monitoring and debugging, the system uses a more granular set of technical phases, which are pushed to the live dashboard. These represent the step-by-step processing of each turn.
+
+-   **`call_bootstrap`**: The initial setup when the webhook is first hit.
+-   **`greeting`**: The opening greeting is being synthesized and played.
+-   **`listening`**: The assistant has finished speaking and is actively listening for the user's response.
+-   **`customer_speaking`**: The VAD has detected that the user has started speaking.
+-   **`utterance_finalized`**: The VAD has detected the end of the user's speech, and a complete audio chunk is ready.
+-   **`transcribing`**: The audio chunk is being sent to the STT service.
+-   **`main_points_ready`**: The transcript has been analyzed to extract key information like intent, issue, and entities.
+-   **`planning_response`**: The `ConversationService` is running its hybrid AI logic to decide on the next action (rule, prompt, or LLM).
+-   **`response_plan_ready`**: A concrete response route has been selected.
+-   **`gemini_requested` / `tts_requested`**: An external AI service (LLM or TTS) is being called.
+-   **`playback_started`**: The synthesized audio response is being streamed back to the user.
+-   **`barge_in_confirmed`**: The user has started speaking while the assistant was talking, triggering an interruption.
+-   **`playback_interrupted`**: The assistant's audio playback has been successfully cancelled.
+-   **`call_summary_ready`**: The call has ended, and a final summary of metrics has been generated.
+-   **`session_cleanup`**: Final background tasks for the call are being completed.
+
+---
+
+## 4. Data Flow: A Single Utterance
 
 This describes the journey of a single user utterance within the conversation loop.
 

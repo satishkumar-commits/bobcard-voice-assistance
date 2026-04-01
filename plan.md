@@ -38,9 +38,10 @@ The immediate priority is to ensure the existing system is robust, reliable, and
     -   Systematically review all external API calls (`httpx` requests) and implement a more robust retry mechanism with exponential backoff for transient network errors.
     -   Enhance logging to provide more context on failures, including request/response payloads where appropriate (and safe).
 
-3.  **Add Security Hardening**:
-    -   **Twilio Request Validation**: Implement the Twilio request signature validation middleware as mentioned in the `README.md`. This is critical for ensuring that webhooks are genuinely from Twilio.
-    -   **Input Sanitization**: While some sanitization is present, conduct a full review to prevent any potential injection or abuse, especially in API endpoints that accept user input.
+3.  **Verify and Enhance Security Hardening**:
+    -   **Twilio Request Validation**: This is already implemented via the `validate_twilio_signature` dependency in `api/routes/twilio.py` and is enabled by default. The focus should now shift to a broader security review.
+    -   **Rate Limiting**: Implement rate limiting on public-facing API endpoints (`/outbound-call`, `/voice`) to prevent abuse and denial-of-service attacks.
+    -   **Input Sanitization**: Conduct a full review of all API inputs to ensure robust sanitization is in place, preventing any potential for injection or abuse.
 
 ### Phase 2: Enhance Core Capabilities
 
@@ -48,15 +49,15 @@ Once the system is stable, focus on improving the core user experience and opera
 
 1.  **Improve State Management**:
     -   The `README.md` notes that conversation state is managed via SQLite history. For higher call volumes and more complex stateful interactions, evaluate and implement a dedicated in-memory store like Redis.
-    -   This will allow for faster state retrieval and the ability to manage more complex session data (e.g., multi-turn issue resolution state) without repeated DB queries.
+    -   This will allow for faster state retrieval and the ability to manage more complex session data. The current `IssueResolutionService`, which tracks multi-turn state like `issue_type` and `follow_up_count`, is a prime candidate for this migration to ensure state is preserved across service restarts and in a scaled environment.
 
 2.  **Evolve the Hybrid AI Model**:
-    -   **Dynamic Prompting**: Instead of relying solely on the static `SYSTEM_PROMPT`, make the prompt generation in `gemini_service.py` more dynamic. Inject the current `issue_type` and `symptom` from `IssueResolutionService` directly into the Gemini prompt to give the LLM better context for generating more specific and helpful replies.
+    -   **Enhance Dynamic Prompting for LLM**: The system already injects dynamic context into the LLM prompt via `build_user_context` (including `current_phase`, `pending_step`, and `notes`). This should be enhanced further. For example, provide a summary of the *outcome* of the last few turns, not just the raw transcripts, to give the LLM a better understanding of the conversation's trajectory and prevent repetitive loops.
     -   **Reduce LLM "Weak Replies"**: The current `_normalize_reply` function in `gemini_service.py` has logic to discard weak replies. Enhance this by training or fine-tuning the model to avoid these generic responses, or by improving the fallback logic to be more context-aware.
 
 3.  **Implement Full Human Handoff**:
     -   **Define Triggers**: Solidify the triggers for handoff (e.g., specific keywords, high frustration score, max turns exceeded, explicit user request).
-    -   **TwiML Logic**: Implement the backend logic to generate the necessary TwiML (`<Dial>` or `<Enqueue>`) to transfer the call to a human agent queue or a direct number.
+    -   **TwiML Logic**: Implement the backend logic in `twilio_service.py` to generate the necessary TwiML (`<Dial>` or `<Enqueue>`) to transfer the call to a human agent queue or a direct number, rather than just hanging up.
     -   **API Endpoint**: Create a new API endpoint that the agent can call to initiate the handoff process.
 
 ### Phase 3: Expand Features and Scale

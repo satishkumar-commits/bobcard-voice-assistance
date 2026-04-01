@@ -49,6 +49,24 @@ class ConversationServiceLanguageGuardTests(unittest.TestCase):
         self.assertIn("May I share the official link?", self.source)
         self.assertIn("क्या मैं official लिंक शेयर करूँ?", self.source)
 
+    def test_link_safety_without_link_word_is_supported_in_link_context(self) -> None:
+        self.assertIn(
+            "if self._looks_like_link_safety_concern(transcript) or self._looks_like_link_safety_concern_without_reference(transcript):",
+            self.source,
+        )
+        self.assertIn('and (issue_state.pending_step or "").startswith("link_")', self.source)
+
+    def test_link_safety_reply_is_forced_compact_without_streamed_filler(self) -> None:
+        self.assertIn("on_assistant_sentence=None", self.source)
+        self.assertIn("llm_streaming_enabled=False", self.source)
+        self.assertIn("allow_latency_filler=False", self.source)
+        self.assertIn("def _compact_link_safety_reassurance_reply", self.source)
+
+    def test_repeat_suppression_preserves_active_issue_context(self) -> None:
+        self.assertIn('"step": "assistant_repeat_bypass"', self.source)
+        self.assertIn('"reason": "preserve_active_issue_context"', self.source)
+        self.assertIn("build_issue_follow_up_question(", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

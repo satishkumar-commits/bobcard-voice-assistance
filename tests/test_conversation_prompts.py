@@ -35,6 +35,9 @@ class ConversationPromptsTests(unittest.TestCase):
         self.assertTrue(detect_auth_denial("नहीं"))
         self.assertTrue(detect_auth_denial("ना"))
 
+    def test_detect_auth_denial_ignores_trailing_na_particle(self) -> None:
+        self.assertFalse(detect_auth_denial("फ्रॉड हो सकता है ना"))
+
     def test_goodbye_detection(self) -> None:
         self.assertTrue(wants_goodbye("thanks bye"))
         self.assertFalse(wants_goodbye("this is a notebook issue"))

@@ -995,6 +995,40 @@ class TwilioMediaStreamService:
                         await stream_sentence_queue.put(None)
                 raise
 
+            if response_epoch != session.assistant_response_epoch:
+                emit_latency_event(
+                    {
+                        "step": "assistant_reply_dropped",
+                        "call_sid": session.call_sid,
+                        "event_timestamp": utc_now_iso(),
+                        "reason": "stale_response_epoch",
+                    }
+                )
+                if stream_completion_future is not None and not stream_completion_future.done():
+                    stream_completion_future.set_result(False)
+                if stream_sentence_queue is not None:
+                    with contextlib.suppress(Exception):
+                        await stream_sentence_queue.put(None)
+                return
+
+            pending_queue_depth = session.utterance_queue.qsize() if session.utterance_queue is not None else 0
+            if pending_queue_depth > 0 and not reply.should_hangup:
+                emit_latency_event(
+                    {
+                        "step": "assistant_reply_dropped",
+                        "call_sid": session.call_sid,
+                        "event_timestamp": utc_now_iso(),
+                        "reason": "newer_customer_utterance_pending",
+                        "queue_depth": pending_queue_depth,
+                    }
+                )
+                if stream_completion_future is not None and not stream_completion_future.done():
+                    stream_completion_future.set_result(False)
+                if stream_sentence_queue is not None:
+                    with contextlib.suppress(Exception):
+                        await stream_sentence_queue.put(None)
+                return
+
             session.language = reply.language_code
             if stream_sentence_queue is not None and stream_completion_future is not None:
                 if not stream_completion_future.done():
@@ -1060,7 +1094,7 @@ class TwilioMediaStreamService:
             await self.realtime_service.publish_call_phase(session.call_sid, TTS_REQUESTED)
             max_reply_chars = max(80, int(self.settings.assistant_tts_max_chars))
             if self._is_opening_greeting_text(reply.text, reply.language_code):
-                max_reply_chars = max(max_reply_chars, 480)
+                max_reply_chars = max(max_reply_chars, 260)
             cleaned_reply_text = sanitize_spoken_text(reply.text, max_length=max_reply_chars)
             # Keep short/medium replies in a single provider request for smoother, continuous playback.
             if cleaned_reply_text and len(cleaned_reply_text) <= max_reply_chars:
@@ -1097,6 +1131,7 @@ class TwilioMediaStreamService:
                     streaming_codec=streaming_codec,
                     first_audio_chunk_ref=first_audio_chunk_ref,
                     allow_slow_mode=not self._is_critical_prompt_text(session.last_assistant_prompt_text, reply.language_code),
+                    use_cache=True,
                 )
 
             await self._send_json(
@@ -1168,7 +1203,7 @@ class TwilioMediaStreamService:
                 and "आवेदन अधूरा" in normalized_text
             )
         return (
-            "bobcards support" in normalized_text
+            "bob card" in normalized_text
             and "application is incomplete" in normalized_text
         )
 
@@ -1223,6 +1258,7 @@ class TwilioMediaStreamService:
                         language_code=queued_sentence.language_code or session.language,
                         streaming_codec=streaming_codec,
                         first_audio_chunk_ref=first_audio_chunk_ref,
+                        use_cache=False,
                     )
                 finally:
                     sentence_queue.task_done()
@@ -1288,6 +1324,7 @@ class TwilioMediaStreamService:
         streaming_codec: str,
         first_audio_chunk_ref: dict[str, bool],
         allow_slow_mode: bool = True,
+        use_cache: bool = True,
     ) -> None:
         if streaming_codec != "mulaw":
             raise RuntimeError(f"Unsupported streaming codec for Twilio media stream: {streaming_codec}")
@@ -1306,7 +1343,7 @@ class TwilioMediaStreamService:
                     language_code=language_code,
                     call_sid=session.call_sid,
                     output_audio_codec=streaming_codec,
-                    use_cache=False,
+                    use_cache=use_cache,
                     prefer_persistent_ws=prefer_persistent_ws,
                 ):
                     total_audio_bytes += len(mulaw_audio)
@@ -1664,10 +1701,17 @@ class TwilioMediaStreamService:
         hard_floor_ms = max(grace_ms, minimum_playback_ms // 2)
         required_speech_ms = max(160, self.settings.stream_barge_in_min_speech_ms, self.settings.barge_in_min_speech_ms)
         if self._is_critical_prompt_text(session.last_assistant_prompt_text, session.language):
-            grace_ms = max(grace_ms, 900)
-            minimum_playback_ms = max(minimum_playback_ms, 1700)
-            hard_floor_ms = max(hard_floor_ms, 900)
-            required_speech_ms = max(required_speech_ms, 980)
+            # Critical prompts still need some playback, but keep interruption practical.
+            grace_ms = max(grace_ms, 650)
+            minimum_playback_ms = max(minimum_playback_ms, 1300)
+            hard_floor_ms = max(hard_floor_ms, 650)
+            required_speech_ms = max(required_speech_ms, 620)
+        if session.speech_active:
+            minimum_playback_ms = max(hard_floor_ms, min(minimum_playback_ms, 1000))
+            required_speech_ms = min(
+                required_speech_ms,
+                max(320, int(self.settings.stream_barge_in_min_speech_ms * 0.6)),
+            )
         strong_speech_ms = max(required_speech_ms + 220, int(required_speech_ms * 1.9))
         if elapsed_ms < hard_floor_ms:
             self._record_barge_in_gate_block(

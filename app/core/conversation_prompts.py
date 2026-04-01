@@ -337,16 +337,15 @@ def build_opening_greeting(
         return (
             f"{salutation}, मैं {assistant_name} हूँ, BOB Card की एआई वॉइस सहायक बोल रही हूँ। "
             "यह कॉल गुणवत्ता के लिए रिकॉर्ड की जा रही है। "
-            "आपका क्रेडिट कार्ड आवेदन अधूरा है, उसे पूरा कराने के लिए मैं कॉल कर रही हूँ। "
-            "क्या अभी दो मिनट बात करना ठीक रहेगा?"
+            "आपका BOB Card आवेदन अधूरा है। क्या अभी एक मिनट बात करना ठीक रहेगा?"
         )
 
     display_name = f"{clean_name} ji" if clean_name else "there"
     return (
-        f"Hello {display_name}. I am {assistant_name}, an AI assistant calling on behalf of BOB Card. "
+        f"Hello {display_name}. I am {assistant_name}, an AI assistant calling on behalf of Bank of Baroda BOB Card. "
         "This call is recorded for quality purposes. "
-        "Your BOBCards credit card application is incomplete, and I am calling to help you complete it. "
-        "Is this a good time to speak for two minutes?"
+        "Your BOBCards credit card application is incomplete, and I can help you complete it. "
+        "Is this a good time to talk for one minute?"
     )
 
 
@@ -941,7 +940,23 @@ def detect_auth_denial(text: str) -> bool:
     normalized = _normalize_choice_text(text)
     if not normalized:
         return False
-    return any(marker in normalized for marker in AUTH_DENY_KEYWORDS)
+    # Keep short "no" intents strict so trailing particles like "...ना?" are not
+    # misread as an explicit denial.
+    strict_no_markers = {"no", "nahi", "nahin", "नहीं", "नही", "ना", "ना जी"}
+    phrase_markers = (
+        "wrong number",
+        "galat number",
+        "not me",
+        "wrong person",
+        "koi aur",
+        "kaun",
+        "नहीं चाहिए",
+        "मत भेजो",
+        "मत भेजिए",
+    )
+    if normalized in strict_no_markers:
+        return True
+    return any(marker in normalized for marker in phrase_markers)
 
 
 def is_valid_short_response(text: str, current_phase: str | None = None) -> bool:
