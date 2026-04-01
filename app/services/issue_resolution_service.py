@@ -17,6 +17,8 @@ class IssueResolutionState:
     pending_step: str | None = None
     post_resolution_prompt_count: int = 0
     repeat_suppression_count: int = 0
+    trust_objection_active: bool = False
+    trust_objection_count: int = 0
 
 
 class IssueResolutionService:
@@ -82,6 +84,8 @@ class IssueResolutionService:
         state.post_resolution_check_pending = True
         state.post_resolution_prompt_count = 0
         state.repeat_suppression_count = 0
+        state.trust_objection_active = False
+        state.trust_objection_count = 0
         return state
 
     def clear_post_resolution_check(self, call_sid: str) -> IssueResolutionState:
@@ -97,6 +101,18 @@ class IssueResolutionService:
         state.follow_up_count = 0
         state.repeat_suppression_count = 0
         state.pending_step = None
+        return state
+
+    def mark_trust_objection(self, call_sid: str) -> IssueResolutionState:
+        state = self.get_state(call_sid)
+        state.trust_objection_active = True
+        state.trust_objection_count += 1
+        return state
+
+    def clear_trust_objection(self, call_sid: str) -> IssueResolutionState:
+        state = self.get_state(call_sid)
+        state.trust_objection_active = False
+        state.trust_objection_count = 0
         return state
 
     def register_post_resolution_prompt(self, call_sid: str) -> IssueResolutionState:

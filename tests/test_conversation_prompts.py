@@ -8,11 +8,13 @@ from app.core.conversation_prompts import (
     build_opening_greeting,
     build_process_restart_link_reply,
     detect_auth_denial,
+    detect_auth_confirmation,
     detect_consent_choice,
     detect_escalation_request,
     detect_language_preference,
     detect_resolution_choice,
     is_short_valid_intent,
+    should_advance_on_affirmative,
     wants_goodbye,
 )
 
@@ -51,7 +53,7 @@ class ConversationPromptsTests(unittest.TestCase):
 
     def test_opening_uses_bob_card_branding(self) -> None:
         greeting = build_opening_greeting(name="Satish", language="en-IN", agent_name="Maya")
-        self.assertIn("Bank of Baroda", greeting)
+        self.assertIn("BOB Card", greeting)
         self.assertIn("BOBCards", greeting)
         self.assertIn("incomplete", greeting)
         self.assertIn("help you complete it", greeting)
@@ -101,6 +103,10 @@ class ConversationPromptsTests(unittest.TestCase):
         reply = build_link_sent_confirmation_prompt("hi-IN")
         self.assertIn("लिंक शेयर", reply)
         self.assertIn("मिला या नहीं मिला", reply)
+
+    def test_identity_affirmation_phrase_with_boliye_advances(self) -> None:
+        self.assertTrue(should_advance_on_affirmative("जी हाँ बोलिए", current_phase="identity_verification"))
+        self.assertTrue(detect_auth_confirmation("जी हाँ बोलिए", current_phase="identity_verification"))
 
 
 if __name__ == "__main__":

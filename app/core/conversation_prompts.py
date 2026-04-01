@@ -206,11 +206,17 @@ SHORT_AFFIRMATIVE_PHRASES = {
     "हां",
     "हाँ जी",
     "हां जी",
+    "हाँ बोलिए",
+    "हां बोलिए",
     "जी",
     "जी हाँ",
     "जी हां",
+    "जी बोलिए",
+    "जी हाँ बोलिए",
+    "जी हां बोलिए",
     "yes",
     "yes ji",
+    "yes please",
     "speaking",
     "main hoon",
     "main hun",
@@ -337,15 +343,16 @@ def build_opening_greeting(
         return (
             f"{salutation}, मैं {assistant_name} हूँ, BOB Card की एआई वॉइस सहायक बोल रही हूँ। "
             "यह कॉल गुणवत्ता के लिए रिकॉर्ड की जा रही है। "
-            "आपका BOB Card आवेदन अधूरा है। क्या अभी एक मिनट बात करना ठीक रहेगा?"
+            "आपका क्रेडिट कार्ड आवेदन अधूरा है, उसे पूरा कराने के लिए मैं कॉल कर रही हूँ। "
+            "क्या अभी दो मिनट बात करना ठीक रहेगा?"
         )
 
     display_name = f"{clean_name} ji" if clean_name else "there"
     return (
-        f"Hello {display_name}. I am {assistant_name}, an AI assistant calling on behalf of Bank of Baroda BOB Card. "
+        f"Hello {display_name}. I am {assistant_name}, an AI assistant calling on behalf of BOB Card. "
         "This call is recorded for quality purposes. "
-        "Your BOBCards credit card application is incomplete, and I can help you complete it. "
-        "Is this a good time to talk for one minute?"
+        "Your BOBCards credit card application is incomplete, and I am calling to help you complete it. "
+        "Is this a good time to speak for two minutes?"
     )
 
 
@@ -477,6 +484,12 @@ def build_link_share_confirmation_prompt(language: str = "en-IN") -> str:
     if normalize_language(language) == "hi-IN":
         return "क्या मैं आपको एक लिंक शेयर करूँ ताकि हम प्रक्रिया जहाँ रुकी थी उसे पूरा कर सकें? कृपया हाँ या नहीं कहिए।"
     return "May I share a link so we can continue from where the process stopped? Please say yes or no."
+
+
+def build_link_share_decline_reason_prompt(language: str = "en-IN") -> str:
+    if normalize_language(language) == "hi-IN":
+        return "ठीक है। लिंक शेयर न करने का मुख्य कारण बताइए, ताकि मैं आपकी चिंता clear कर सकूँ।"
+    return "Understood. Please share the main reason you do not want the link, so I can address your concern."
 
 
 def build_link_sent_confirmation_prompt(language: str = "en-IN") -> str:
@@ -1005,6 +1018,13 @@ def should_advance_on_affirmative(text: str, current_phase: str | None = None) -
         normalized == choice.lower() or normalized.startswith(f"{choice.lower()} ")
         for choice in SHORT_AFFIRMATIVE_PHRASES
     ):
+        return True
+
+    tokens = set(normalized.split())
+    affirmative_tokens = {"हाँ", "हां", "haan", "ha", "yes", "जी", "ji", "bilkul", "correct", "right"}
+    invitation_tokens = {"बोलिए", "bolo", "boliye", "speaking"}
+    negation_tokens = {"नहीं", "नही", "ना", "no", "nahi", "nahin"}
+    if tokens & affirmative_tokens and tokens & invitation_tokens and not (tokens & negation_tokens):
         return True
 
     consent_choice = detect_consent_choice(

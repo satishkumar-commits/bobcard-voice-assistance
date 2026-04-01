@@ -58,6 +58,7 @@ from app.core.conversation_prompts import (
     build_identity_verification_prompt,
     build_issue_capture_prompt,
     build_link_confirmation_reprompt,
+    build_link_share_decline_reason_prompt,
     build_link_received_next_prompt,
     build_link_sent_confirmation_prompt,
     build_link_share_confirmation_prompt,
@@ -129,6 +130,12 @@ class ConversationReply:
     should_hangup: bool = False
 
 
+@dataclass
+class TranscriptClassification:
+    label: str
+    reason: str
+
+
 class ConversationService:
     def __init__(
         self,
@@ -157,6 +164,7 @@ class ConversationService:
         self.max_turns = max_turns
         self.max_post_resolution_prompts = 1
         self.max_repeat_suppression = 2
+        self.max_trust_objection_holds = 2
         self._deterministic_early_states: set[BusinessState] = {
             OPENING,
             CONSENT_CHECK,
@@ -515,7 +523,98 @@ class ConversationService:
             )
         await self._publish_audio_quality(call.call_sid, quality_state.as_payload())
 
-        if quality_assessment.transcript_reliable:
+        transcript_classification = self._classify_transcript(
+            transcript=transcript,
+            quality_assessment=quality_assessment,
+            business_state=issue_state.business_state,
+            pending_step=issue_state.pending_step,
+        )
+        emit_latency_event(
+            {
+                "step": "transcript_classified",
+                "call_sid": call.call_sid,
+                "event_timestamp": utc_now_iso(),
+                "classification": transcript_classification.label,
+                "reason": transcript_classification.reason,
+                "business_state": issue_state.business_state,
+                "transcript_preview": sanitize_spoken_text(transcript)[:80],
+            }
+        )
+
+        if issue_state.trust_objection_active and transcript_classification.label != "objection":
+            if self._is_trust_objection_resolved(transcript, issue_state.business_state):
+                self.issue_resolution_service.clear_trust_objection(call.call_sid)
+                issue_state = self.issue_resolution_service.get_state(call.call_sid)
+                emit_latency_event(
+                    {
+                        "step": "trust_objection_resolved",
+                        "call_sid": call.call_sid,
+                        "event_timestamp": utc_now_iso(),
+                        "business_state": issue_state.business_state,
+                    }
+                )
+            elif self._allows_trust_objection_decline(transcript):
+                self.issue_resolution_service.clear_trust_objection(call.call_sid)
+                issue_state = self.issue_resolution_service.get_state(call.call_sid)
+                emit_latency_event(
+                    {
+                        "step": "trust_objection_declined",
+                        "call_sid": call.call_sid,
+                        "event_timestamp": utc_now_iso(),
+                        "business_state": issue_state.business_state,
+                    }
+                )
+            elif transcript_classification.label not in {"empty", "weak"} and not self._allows_trust_objection_decline(transcript):
+                transcript_classification = TranscriptClassification(
+                    label="objection",
+                    reason="trust_objection_unresolved",
+                )
+
+        if transcript_classification.label in {"empty", "weak"}:
+            return await self._handle_unclear_audio(
+                call,
+                transcript=transcript,
+                confidence=quality_assessment.confidence,
+                confidence_source=quality_assessment.confidence_source,
+                speech_detected=quality_assessment.speech_detected,
+            )
+
+        if transcript_classification.label == "off_path":
+            await self.add_transcript(call, "customer", transcript)
+            self.audio_quality_service.register_success(call.call_sid, transcript)
+            await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
+            emit_latency_event(
+                {
+                    "step": "state_transition_held",
+                    "call_sid": call.call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "reason": "off_path_transcript",
+                    "business_state": issue_state.business_state,
+                }
+            )
+            hold_reply = self._short_reprompt_for_business_state(
+                issue_state.business_state,
+                prompt_language,
+                pending_step=issue_state.pending_step,
+            )
+            return await self._build_text_turn(
+                call,
+                hold_reply,
+                outcome="state-hold-off-path",
+            )
+
+        if transcript_classification.label == "objection":
+            await self.add_transcript(call, "customer", transcript)
+            self.audio_quality_service.register_success(call.call_sid, transcript)
+            await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
+            return await self._handle_trust_objection_hold(
+                call=call,
+                prompt_language=prompt_language,
+                business_state=issue_state.business_state,
+                pending_step=issue_state.pending_step,
+            )
+
+        if transcript_classification.label == "valid":
             early_state_reply = await self._handle_business_state_transition(
                 call=call,
                 transcript=transcript,
@@ -612,11 +711,45 @@ class ConversationService:
         await self.add_transcript(call, "customer", transcript)
         optional_customer_name = await self._pick_customer_name(call, resolved_customer_name)
 
+        if response_plan["route"] == "state_hold_reprompt":
+            emit_latency_event(
+                {
+                    "step": "state_transition_held",
+                    "call_sid": call.call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "reason": response_plan.get("hold_reason") or "missing_exit_intent",
+                    "business_state": issue_state.business_state,
+                }
+            )
+            hold_reply = self._short_reprompt_for_business_state(
+                issue_state.business_state,
+                prompt_language,
+                pending_step=issue_state.pending_step,
+            )
+            return await self._build_text_turn(
+                call,
+                hold_reply,
+                outcome="state-hold-reprompt",
+            )
+
+        if response_plan["route"] == "trust_reassurance_hold":
+            return await self._handle_trust_objection_hold(
+                call=call,
+                prompt_language=prompt_language,
+                business_state=issue_state.business_state,
+                pending_step=issue_state.pending_step,
+            )
+
         if response_plan["route"] == "opt_out_close" and from_number:
             await self._record_opt_out(from_number, "caller-requested-opt-out")
             await self._set_business_state(call.call_sid, CONFIRMATION_CLOSING)
             reply_text = build_opt_out_reply(prompt_language)
             return await self._build_text_turn(call, reply_text, should_hangup=True, outcome="opted-out")
+
+        if response_plan["route"] == "callback_close":
+            await self._set_business_state(call.call_sid, CONFIRMATION_CLOSING)
+            reply_text = build_callback_ack(prompt_language)
+            return await self._build_text_turn(call, reply_text, should_hangup=True, outcome="callback-requested")
 
         if response_plan["route"] == "application_not_started_close":
             await self._set_business_state(call.call_sid, CONFIRMATION_CLOSING)
@@ -723,7 +856,26 @@ class ConversationService:
             )
 
         if response_plan["route"] == "general_capabilities":
-            await self._set_business_state(call.call_sid, RESOLUTION_ACTION)
+            next_state = (
+                RESOLUTION_ACTION
+                if self._can_advance_to_resolution_action(
+                    transcript=transcript,
+                    issue_state=issue_state,
+                    consent_choice=consent_choice,
+                )
+                else issue_state.business_state
+            )
+            await self._set_business_state(call.call_sid, next_state)
+            if next_state != RESOLUTION_ACTION:
+                emit_latency_event(
+                    {
+                        "step": "state_transition_held",
+                        "call_sid": call.call_sid,
+                        "event_timestamp": utc_now_iso(),
+                        "reason": "general_capabilities_without_exit_intent",
+                        "business_state": issue_state.business_state,
+                    }
+                )
             reply_text = build_general_capabilities_reply(prompt_language, response_style=issue_state.response_style)
             reply_text = self._apply_voice_guardrail(
                 reply_text,
@@ -933,7 +1085,26 @@ class ConversationService:
             return await self._build_text_turn(call, build_noisy_fallback_reply(prompt_language))
 
         await self._publish_speaking(call.call_sid, "assistant", True)
-        await self._set_business_state(call.call_sid, RESOLUTION_ACTION)
+        next_state = (
+            RESOLUTION_ACTION
+            if self._can_advance_to_resolution_action(
+                transcript=transcript,
+                issue_state=issue_state,
+                consent_choice=consent_choice,
+            )
+            else issue_state.business_state
+        )
+        await self._set_business_state(call.call_sid, next_state)
+        if next_state != RESOLUTION_ACTION:
+            emit_latency_event(
+                {
+                    "step": "state_transition_held",
+                    "call_sid": call.call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "reason": "gemini_route_without_exit_intent",
+                    "business_state": issue_state.business_state,
+                }
+            )
         response_mode = response_plan.get("reply_mode") or (
             "noisy" if self.audio_quality_service.should_use_short_responses(quality_state) else "normal"
         )
@@ -1266,18 +1437,28 @@ class ConversationService:
             self.audio_quality_service.register_success(call.call_sid, transcript)
             await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
 
-            target_language = selected_language or turn_language or self._prompt_language(call)
+            if not selected_language:
+                emit_latency_event(
+                    {
+                        "step": "state_transition_held",
+                        "call_sid": call.call_sid,
+                        "event_timestamp": utc_now_iso(),
+                        "reason": "language_selection_requires_explicit_choice",
+                        "business_state": business_state,
+                    }
+                )
+                return await self._build_text_turn(
+                    call,
+                    build_language_preference_reprompt(name=optional_customer_name),
+                    outcome="language-selection-hold",
+                )
+
+            target_language = selected_language
             if target_language != call.language:
                 call.language = target_language
                 await self.session.commit()
                 await self._publish_call_status(call)
             prompt_language = self._prompt_language(call)
-
-            if not selected_language and not normalized_transcript:
-                return await self._build_text_turn(
-                    call,
-                    build_language_preference_reprompt(name=optional_customer_name),
-                )
 
             await self._set_business_state(call.call_sid, IDENTITY_VERIFICATION)
             if selected_language:
@@ -1342,17 +1523,26 @@ class ConversationService:
                     )
 
                 if detect_auth_denial(transcript):
-                    self.issue_resolution_service.set_pending_step(call.call_sid, None)
-                    await self._set_business_state(call.call_sid, ISSUE_CAPTURE)
+                    self.issue_resolution_service.set_pending_step(call.call_sid, "link_decline_reason")
                     return await self._build_text_turn(
                         call,
-                        build_issue_capture_prompt(prompt_language, name=optional_customer_name),
-                        outcome="link-share-declined",
+                        build_link_share_decline_reason_prompt(prompt_language),
+                        outcome="link-share-decline-reason-requested",
                     )
 
-                if self._looks_like_link_share_request(transcript) or detect_auth_confirmation(
-                    transcript, current_phase=CONTEXT_SETTING
-                ):
+                if self._looks_like_call_purpose_question(transcript):
+                    self.issue_resolution_service.set_pending_step(call.call_sid, "link_share_consent")
+                    reply_text = (
+                        f"{build_process_resume_context_reply(language=prompt_language)} "
+                        f"{build_link_share_confirmation_prompt(prompt_language)}"
+                    )
+                    return await self._build_text_turn(
+                        call,
+                        reply_text,
+                        outcome="link-share-purpose-clarify",
+                    )
+
+                if self._has_explicit_link_share_consent(transcript):
                     self.issue_resolution_service.set_pending_step(call.call_sid, "link_confirmation")
                     return await self._build_text_turn(
                         call,
@@ -1364,6 +1554,45 @@ class ConversationService:
                     call,
                     build_link_share_confirmation_prompt(prompt_language),
                     outcome="link-share-consent-reprompt",
+                )
+
+            if issue_state.pending_step == "link_decline_reason":
+                await self.add_transcript(call, "customer", transcript)
+                self.audio_quality_service.register_success(call.call_sid, transcript)
+                await self._publish_audio_quality(call.call_sid, self.audio_quality_service.get_state(call.call_sid).as_payload())
+
+                if self._has_explicit_link_share_consent(transcript):
+                    self.issue_resolution_service.set_pending_step(call.call_sid, "link_confirmation")
+                    return await self._build_text_turn(
+                        call,
+                        build_link_sent_confirmation_prompt(prompt_language),
+                        outcome="link-share-consented",
+                    )
+
+                # A bare decline without a reason should trigger a focused follow-up question first.
+                if detect_auth_denial(transcript):
+                    self.issue_resolution_service.set_pending_step(call.call_sid, "link_decline_reason")
+                    return await self._build_text_turn(
+                        call,
+                        build_link_share_decline_reason_prompt(prompt_language),
+                        outcome="link-share-decline-reason-reprompt",
+                    )
+
+                self.issue_resolution_service.set_pending_step(call.call_sid, "link_share_consent")
+                reply_text = await self._build_link_decline_reason_followup_text(
+                    history=history,
+                    decline_reason=transcript,
+                    prompt_language=prompt_language,
+                    response_style=issue_state.response_style,
+                    issue_type=issue_state.issue_type,
+                    call_sid=call.call_sid,
+                    on_assistant_sentence=on_assistant_sentence,
+                    llm_streaming_enabled=llm_streaming_enabled,
+                )
+                return await self._build_text_turn(
+                    call,
+                    reply_text,
+                    outcome="link-share-decline-followup",
                 )
 
             if issue_state.pending_step == "link_confirmation":
@@ -1976,6 +2205,322 @@ class ConversationService:
         min_chars = max(1, int(self.audio_quality_service.settings.empty_transcript_min_chars))
         return meaningful_chars < min_chars
 
+    def _classify_transcript(
+        self,
+        *,
+        transcript: str,
+        quality_assessment,
+        business_state: BusinessState,
+        pending_step: str | None,
+    ) -> TranscriptClassification:
+        normalized = normalize_issue_text(transcript)
+        if not normalized:
+            return TranscriptClassification(label="empty", reason="empty_transcript")
+
+        if self._looks_like_trust_or_fraud_objection(transcript) or self._looks_like_identity_verification_request(transcript):
+            return TranscriptClassification(label="objection", reason="trust_or_verification_objection")
+
+        short_intent = is_short_valid_intent(transcript)
+        low_confidence_short = (
+            len(normalized.split()) <= 1
+            and quality_assessment.confidence < max(0.42, self.audio_quality_service.settings.stt_confidence_threshold * 0.88)
+            and not short_intent
+        )
+        if (not quality_assessment.transcript_reliable and not short_intent) or low_confidence_short:
+            return TranscriptClassification(label="weak", reason="weak_or_low_confidence_transcript")
+
+        if self._is_off_path_transcript(transcript, business_state=business_state, pending_step=pending_step):
+            return TranscriptClassification(label="off_path", reason="off_path_for_state")
+
+        return TranscriptClassification(label="valid", reason="valid_transcript")
+
+    def _is_off_path_transcript(
+        self,
+        transcript: str,
+        *,
+        business_state: BusinessState,
+        pending_step: str | None,
+    ) -> bool:
+        if business_state not in {OPENING, CONSENT_CHECK, LANGUAGE_SELECTION, IDENTITY_VERIFICATION, CONTEXT_SETTING}:
+            return False
+        normalized = normalize_issue_text(transcript)
+        if not normalized or len(normalized.split()) <= 1:
+            return False
+        if pending_step in {"link_share_consent", "link_decline_reason", "link_confirmation"}:
+            return False
+        if detect_consent_choice(transcript, current_stage=business_state) != "unknown":
+            return False
+        if detect_auth_confirmation(transcript, current_phase=business_state) or detect_auth_denial(transcript):
+            return False
+        if self._looks_like_call_purpose_question(transcript):
+            return False
+        if self._looks_like_step_clarification_request(transcript):
+            return False
+        if detect_issue_type(transcript) or detect_issue_symptom(transcript):
+            return False
+        if self._looks_like_link_share_request(transcript) or self._looks_like_link_not_received(transcript):
+            return False
+        if self._looks_like_link_safety_concern(transcript):
+            return False
+        return True
+
+    @staticmethod
+    def _looks_like_trust_or_fraud_objection(text: str) -> bool:
+        normalized = normalize_issue_text(text)
+        if not normalized:
+            return False
+        direct_markers = (
+            "fraud",
+            "फ्रॉड",
+            "scam",
+            "स्कैम",
+            "fake",
+            "फेक",
+            "spam",
+            "स्पैम",
+            "phishing",
+            "genuine hai",
+            "genuine hai na",
+            "real hai",
+            "official hai",
+            "asli hai",
+            "असली है",
+            "ऑफिशियल है",
+            "kaise bharosa",
+            "bharosa kaise",
+            "कैसे भरोसा",
+            "भरोसा कैसे",
+            "verify kaise",
+            "kaise verify",
+            "वेरिफ़ाई कैसे",
+            "वेरिफाई कैसे",
+            "सत्यापित कैसे",
+        )
+        if any(marker in normalized for marker in direct_markers):
+            return True
+        concern_markers = ("safe", "secure", "genuine", "official", "suspicious", "unsafe", "सुरक्षित", "ऑफिशियल")
+        trust_question_markers = ("kya", "कैसे", "kaise", "kya", "ना", "nah", "sure", "pakka", "confirm")
+        return any(marker in normalized for marker in concern_markers) and any(
+            marker in normalized for marker in trust_question_markers
+        )
+
+    @staticmethod
+    def _looks_like_identity_verification_request(text: str) -> bool:
+        normalized = normalize_issue_text(text)
+        if not normalized:
+            return False
+        markers = (
+            "aap kaun",
+            "आप कौन",
+            "who are you",
+            "tum kaun",
+            "कौन बोल रहे",
+            "कौन बोल रही",
+            "identify yourself",
+            "id batao",
+            "id बताओ",
+            "proof",
+            "prove",
+            "verification",
+            "verify",
+            "वेरिफ़िकेशन",
+            "वेरिफिकेशन",
+            "सत्यापन",
+        )
+        return any(marker in normalized for marker in markers)
+
+    @staticmethod
+    def _build_trust_reassurance_reply(language: str, objection_count: int = 1) -> str:
+        if normalize_language(language) == "hi-IN":
+            if objection_count <= 1:
+                return (
+                    "आपका सवाल सही है। मैं BOB Card सहायता टीम से बोल रही हूँ। "
+                    "हम कभी OTP, PIN, CVV या पासवर्ड नहीं मांगते। "
+                    "आप बैंक की official वेबसाइट या customer care नंबर से verify कर सकते हैं। "
+                    "अगर आप सहज हों तो मैं सिर्फ official लिंक से आगे बढ़ाऊँ, नहीं तो कॉल यहीं रोक दें।"
+                )
+            return (
+                "बिलकुल ठीक। सुरक्षा पहले है। मैं OTP, PIN, CVV नहीं पूछूँगी। "
+                "आप पहले official चैनल से verify कीजिए। "
+                "फिर चाहें तो बोलें 'हाँ, आगे बढ़िए', या 'नहीं, अभी नहीं'।"
+            )
+        if objection_count <= 1:
+            return (
+                "Your concern is valid. I am calling from the BOB Card support flow. "
+                "We will never ask for OTP, PIN, CVV, or password. "
+                "You can verify this call via the bank's official website or customer care number. "
+                "If you are comfortable, I can continue only with the official link, or we can stop here."
+            )
+        return (
+            "Absolutely, safety first. I will not ask OTP, PIN, CVV, or password. "
+            "Please verify on an official channel first, then say 'yes, continue' or 'no, not now'."
+        )
+
+    def _is_trust_objection_resolved(self, transcript: str, business_state: BusinessState) -> bool:
+        if self._looks_like_trust_or_fraud_objection(transcript) or self._looks_like_identity_verification_request(transcript):
+            return False
+        consent_choice = detect_consent_choice(
+            transcript,
+            current_stage=business_state if business_state in {OPENING, CONSENT_CHECK} else None,
+        )
+        if consent_choice in {"granted", "send_link"}:
+            return True
+        if detect_auth_confirmation(transcript, current_phase=business_state):
+            return True
+        normalized = normalize_issue_text(transcript)
+        if not normalized:
+            return False
+        proceed_markers = (
+            "ठीक है आगे",
+            "ठीक है बोलिए",
+            "haan boliye",
+            "ji boliye",
+            "go ahead",
+            "continue",
+            "proceed",
+            "okay continue",
+            "ok continue",
+        )
+        return any(marker in normalized for marker in proceed_markers)
+
+    def _allows_trust_objection_decline(self, transcript: str) -> bool:
+        if self._wants_to_end_call(transcript) or detect_escalation_request(transcript):
+            return True
+        if self._is_opt_out_request(transcript):
+            return True
+        normalized = normalize_issue_text(transcript)
+        decline_markers = (
+            "callback",
+            "call back",
+            "later",
+            "abhi nahi",
+            "अभी नहीं",
+            "नहीं चाहिए",
+            "मत कॉल",
+            "not now",
+        )
+        return any(marker in normalized for marker in decline_markers)
+
+    async def _handle_trust_objection_hold(
+        self,
+        *,
+        call: Call,
+        prompt_language: str,
+        business_state: BusinessState,
+        pending_step: str | None,
+    ) -> ConversationTurn:
+        trust_state = self.issue_resolution_service.mark_trust_objection(call.call_sid)
+        if trust_state.trust_objection_count > self.max_trust_objection_holds:
+            emit_latency_event(
+                {
+                    "step": "trust_objection_safe_fallback",
+                    "call_sid": call.call_sid,
+                    "event_timestamp": utc_now_iso(),
+                    "business_state": business_state,
+                    "pending_step": pending_step,
+                    "count": trust_state.trust_objection_count,
+                }
+            )
+            reply_text = self._build_trust_safe_fallback_reply(prompt_language)
+            return await self._build_text_turn(call, reply_text, outcome="trust-objection-safe-fallback")
+
+        emit_latency_event(
+            {
+                "step": "trust_objection_hold",
+                "call_sid": call.call_sid,
+                "event_timestamp": utc_now_iso(),
+                "business_state": business_state,
+                "pending_step": pending_step,
+                "count": trust_state.trust_objection_count,
+            }
+        )
+        reply_text = self._build_trust_reassurance_reply(prompt_language, trust_state.trust_objection_count)
+        return await self._build_text_turn(call, reply_text, outcome="trust-objection-hold")
+
+    @staticmethod
+    def _build_trust_safe_fallback_reply(language: str) -> str:
+        if normalize_language(language) == "hi-IN":
+            return (
+                "जी, आपकी सुरक्षा चिंता सही है। मैं अभी लिंक शेयर नहीं करूँगी। "
+                "आप official वेबसाइट, ब्रांच या customer care से verify कर लें। "
+                "चाहें तो 'कॉलबैक' कहें, या 'अभी नहीं' कहकर कॉल यहीं समाप्त करें।"
+            )
+        return (
+            "Your safety concern is valid, so I will not share any link right now. "
+            "Please verify through the official website, branch, or customer care first. "
+            "You can say callback, or say not now to end this call."
+        )
+
+    def _has_explicit_state_exit_intent(
+        self,
+        *,
+        transcript: str,
+        business_state: BusinessState,
+        pending_step: str | None,
+        consent_choice: str,
+        selected_language: str | None,
+    ) -> bool:
+        if self._looks_like_trust_or_fraud_objection(transcript) or self._looks_like_identity_verification_request(transcript):
+            return False
+        if business_state in {OPENING, CONSENT_CHECK}:
+            return consent_choice != "unknown" or self._looks_like_call_purpose_question(transcript)
+        if business_state == LANGUAGE_SELECTION:
+            return bool(selected_language)
+        if business_state == IDENTITY_VERIFICATION:
+            return detect_auth_confirmation(transcript, current_phase=IDENTITY_VERIFICATION) or detect_auth_denial(transcript)
+        if business_state == CONTEXT_SETTING:
+            if pending_step == "link_share_consent":
+                return (
+                    self._has_explicit_link_share_consent(transcript)
+                    or detect_auth_denial(transcript)
+                    or self._looks_like_call_purpose_question(transcript)
+                )
+            if pending_step == "link_decline_reason":
+                normalized = normalize_issue_text(transcript)
+                return bool(normalized) and (
+                    len(normalized.split()) >= 2
+                    or self._has_explicit_link_share_consent(transcript)
+                    or self._looks_like_link_safety_concern(transcript)
+                    or self._looks_like_link_safety_concern_without_reference(transcript)
+                    or self._looks_like_call_purpose_question(transcript)
+                )
+            if pending_step == "link_confirmation":
+                return (
+                    detect_auth_confirmation(transcript, current_phase=CONTEXT_SETTING)
+                    or detect_auth_denial(transcript)
+                    or self._looks_like_link_not_received(transcript)
+                    or self._looks_like_link_share_request(transcript)
+                    or self._looks_like_link_safety_concern(transcript)
+                )
+            return bool(detect_issue_type(transcript) or detect_issue_symptom(transcript))
+        if business_state == ISSUE_CAPTURE:
+            return bool(detect_issue_type(transcript) or detect_issue_symptom(transcript) or self._looks_like_issue_resolved(transcript))
+        if business_state == RESOLUTION_ACTION:
+            return bool(
+                self._looks_like_issue_resolved(transcript)
+                or detect_resolution_choice(transcript) != "unknown"
+                or detect_escalation_request(transcript)
+                or self._wants_to_end_call(transcript)
+            )
+        return True
+
+    def _can_advance_to_resolution_action(
+        self,
+        *,
+        transcript: str,
+        issue_state,
+        consent_choice: str,
+    ) -> bool:
+        if issue_state.business_state == RESOLUTION_ACTION:
+            return True
+        return self._has_explicit_state_exit_intent(
+            transcript=transcript,
+            business_state=issue_state.business_state,
+            pending_step=issue_state.pending_step,
+            consent_choice=consent_choice,
+            selected_language=None,
+        )
+
     @staticmethod
     def _normalize_brand_phrase(text: str) -> str:
         normalized = re.sub(r"\bBOBCards\b", "BOB Card", text, flags=re.IGNORECASE)
@@ -2144,6 +2689,13 @@ class ConversationService:
                         "I will proceed only with your consent. May I send the link?",
                     )
                     return variants[variant_index % len(variants)]
+                if pending_step == "link_decline_reason":
+                    variants = (
+                        "Please share one reason for not accepting the link yet.",
+                        "I understand. Please tell me your main concern about the link.",
+                        "Please tell me what is stopping you from accepting the official link.",
+                    )
+                    return variants[variant_index % len(variants)]
                 variants = (
                     "Please confirm if the link was received.",
                     "Please say link received or not received.",
@@ -2170,6 +2722,13 @@ class ConversationService:
                     "कृपया हाँ या नहीं कहिए। क्या मैं official लिंक शेयर करूँ?",
                     "क्या मैं अभी लिंक भेजूँ? कृपया सिर्फ हाँ या नहीं कहिए।",
                     "आपकी अनुमति के बाद ही लिंक भेजूँगी। क्या मैं भेजूँ?",
+                )
+                return variants[variant_index % len(variants)]
+            if pending_step == "link_decline_reason":
+                variants = (
+                    "ठीक है। लिंक न लेने का एक कारण बताइए।",
+                    "समझ गई। लिंक को लेकर आपकी मुख्य चिंता क्या है?",
+                    "कृपया बताइए, official लिंक लेने में आपको किस बात का संदेह है?",
                 )
                 return variants[variant_index % len(variants)]
             variants = (
@@ -2389,6 +2948,57 @@ class ConversationService:
         if not self._looks_like_link_safety_reassurance_reply(reply_text):
             reply_text = build_link_safety_reassurance_reply(prompt_language)
         return self._compact_link_safety_reassurance_reply(reply_text, prompt_language)
+
+    async def _build_link_decline_reason_followup_text(
+        self,
+        *,
+        history: list[dict[str, str]],
+        decline_reason: str,
+        prompt_language: str,
+        response_style: str,
+        issue_type: str | None,
+        call_sid: str,
+        on_assistant_sentence: Callable[[str, str], Awaitable[None]] | None,
+        llm_streaming_enabled: bool | None,
+    ) -> str:
+        guidance_instruction = (
+            "कॉलर ने लिंक लेने से मना किया है। दिए गए कारण के अनुसार भरोसा बढ़ाने वाला जवाब दें। "
+            "स्पष्ट बोलें कि लिंक BOB Card का official लिंक है, और OTP/PIN/CVV कभी शेयर न करें। "
+            "जवाब छोटा रखें और अंत में हाँ/नहीं वाला consent सवाल पूछें: "
+            "क्या मैं official लिंक शेयर करूँ? कृपया हाँ या नहीं कहिए।"
+            if normalize_language(prompt_language) == "hi-IN"
+            else (
+                "The caller declined the link. Address the specific reason and build trust. "
+                "Clearly mention this is the official BOB Card link and remind them not to share OTP/PIN/CVV. "
+                "Keep it concise and end with a yes/no consent question: "
+                "May I share the official link now? Please say yes or no."
+            )
+        )
+
+        model_input = f"Caller reason for declining link: {decline_reason}\n\n{guidance_instruction}"
+        reply_text = await self._generate_gemini_reply(
+            history=history,
+            latest_user_text=model_input,
+            response_mode="normal",
+            language_code=prompt_language,
+            response_style=response_style,
+            active_issue_type=issue_type,
+            call_sid=call_sid,
+            # Keep trust-and-consent follow-up as one compact answer.
+            on_assistant_sentence=None,
+            llm_streaming_enabled=False,
+            allow_latency_filler=False,
+        )
+
+        if not self._looks_like_link_safety_reassurance_reply(reply_text):
+            reply_text = build_link_safety_reassurance_reply(prompt_language)
+
+        compact = self._compact_link_safety_reassurance_reply(reply_text, prompt_language)
+        consent_prompt = build_link_share_confirmation_prompt(prompt_language)
+        normalized_compact = normalize_issue_text(compact)
+        if "हाँ या नहीं" not in normalized_compact and "yes or no" not in normalized_compact:
+            compact = f"{compact.rstrip()} {consent_prompt}"
+        return sanitize_spoken_text(compact, max_length=240)
 
     @staticmethod
     def _looks_like_link_safety_reassurance_reply(text: str) -> bool:
@@ -2711,6 +3321,8 @@ class ConversationService:
             link_pending_context and self._looks_like_link_safety_concern_without_reference(transcript)
         )
         link_context_followup = self._looks_like_link_context_followup(transcript)
+        trust_objection = self._looks_like_trust_or_fraud_objection(transcript)
+        verification_request = self._looks_like_identity_verification_request(transcript)
         audio_state = self.audio_quality_service.get_state(call.call_sid)
         if consent_choice == "opt_out":
             primary_intent = "opt_out"
@@ -2718,6 +3330,8 @@ class ConversationService:
             primary_intent = "send_link"
         elif consent_choice == "callback":
             primary_intent = "callback"
+        elif trust_objection or verification_request:
+            primary_intent = "objection"
         elif link_not_received or link_share_request or link_safety_concern or link_context_followup:
             primary_intent = "link_followup"
         elif escalation_requested:
@@ -2771,6 +3385,8 @@ class ConversationService:
             "link_share_request": link_share_request,
             "link_safety_concern": link_safety_concern,
             "link_context_followup": link_context_followup,
+            "trust_objection": trust_objection,
+            "verification_request": verification_request,
             "noisy_call": audio_state.noise_flag,
             "fallback_mode": audio_state.fallback_mode,
         }
@@ -2849,11 +3465,29 @@ class ConversationService:
         primary_intent = str(main_points.get("primary_intent") or "")
         active_issue_resolved_signal = bool(main_points.get("active_issue_resolved_signal"))
         link_safety_concern = bool(main_points.get("link_safety_concern"))
+        trust_objection = (
+            bool(main_points.get("trust_objection"))
+            or bool(main_points.get("verification_request"))
+            or bool(issue_state.trust_objection_active)
+        )
+        hold_reason: str | None = None
+        state_exit_intent = self._has_explicit_state_exit_intent(
+            transcript=transcript,
+            business_state=issue_state.business_state,
+            pending_step=issue_state.pending_step,
+            consent_choice=consent_choice,
+            selected_language=selected_language,
+        )
 
         if not quality_assessment.transcript_reliable:
             route = "unclear_audio"
             objective = "Ask the caller to repeat or switch to noisy-call fallback guidance."
             response_source = "system"
+        elif trust_objection and not self._allows_trust_objection_decline(transcript):
+            route = "trust_reassurance_hold"
+            objective = "Address fraud/trust concern and hold scripted progression until caller confirms continuation."
+            response_source = "prompt"
+            use_gemini = False
         elif customer_turn_count <= 1 and consent_choice == "granted":
             route = "post_greeting_issue_capture"
             objective = "Move from greeting consent into issue capture."
@@ -3064,6 +3698,27 @@ class ConversationService:
             objective = "Use noisy-call fallback handling."
             response_source = "fallback"
 
+        transition_sensitive_routes = {
+            "gemini_response",
+            "rule_guidance",
+            "guided_followup",
+            "guided_clarify",
+            "resolution_follow_up",
+            "post_greeting_issue_capture",
+        }
+        if (
+            route in transition_sensitive_routes
+            and not state_exit_intent
+            and not should_hangup
+            and not issue_state.post_resolution_check_pending
+            and issue_state.business_state in {OPENING, CONSENT_CHECK, LANGUAGE_SELECTION, IDENTITY_VERIFICATION, CONTEXT_SETTING}
+        ):
+            hold_reason = "state_exit_intent_missing"
+            route = "state_hold_reprompt"
+            objective = "Hold current state and reprompt until explicit exit intent is captured."
+            response_source = "prompt"
+            use_gemini = False
+
         return {
             "route": route,
             "objective": objective,
@@ -3077,6 +3732,8 @@ class ConversationService:
             "symptom": symptom,
             "language": prompt_language,
             "response_style": main_points.get("response_style"),
+            "hold_reason": hold_reason,
+            "state_exit_intent": state_exit_intent,
         }
 
     @staticmethod
@@ -3104,6 +3761,22 @@ class ConversationService:
     def _looks_like_link_share_request(text: str) -> bool:
         normalized = normalize_issue_text(text)
         if not normalized:
+            return False
+        question_or_doubt_markers = (
+            "why",
+            "kyu",
+            "kyun",
+            "kyon",
+            "क्यों",
+            "क्यो",
+            "kya",
+            "क्या",
+            "kisliye",
+            "किसलिए",
+            "kyo share",
+            "क्यों शेयर",
+        )
+        if any(marker in normalized for marker in question_or_doubt_markers):
             return False
         link_markers = (
             "link",
@@ -3140,6 +3813,12 @@ class ConversationService:
         has_request_marker = any(marker in normalized for marker in request_markers)
         has_restart_marker = any(marker in normalized for marker in restart_markers)
         return has_link_marker and (has_request_marker or has_restart_marker)
+
+    @staticmethod
+    def _has_explicit_link_share_consent(text: str) -> bool:
+        if detect_auth_confirmation(text, current_phase=CONTEXT_SETTING):
+            return True
+        return ConversationService._looks_like_link_share_request(text)
 
     @staticmethod
     def _has_link_reference(text: str) -> bool:

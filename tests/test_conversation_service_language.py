@@ -67,6 +67,15 @@ class ConversationServiceLanguageGuardTests(unittest.TestCase):
         self.assertIn('"reason": "preserve_active_issue_context"', self.source)
         self.assertIn("build_issue_follow_up_question(", self.source)
 
+    def test_link_share_consent_requires_explicit_confirmation(self) -> None:
+        self.assertIn("if self._has_explicit_link_share_consent(transcript):", self.source)
+        self.assertIn("def _has_explicit_link_share_consent(text: str) -> bool:", self.source)
+        self.assertIn("detect_auth_confirmation(text, current_phase=CONTEXT_SETTING)", self.source)
+
+    def test_link_share_request_rejects_question_form(self) -> None:
+        self.assertIn("question_or_doubt_markers", self.source)
+        self.assertIn('if any(marker in normalized for marker in question_or_doubt_markers):', self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
